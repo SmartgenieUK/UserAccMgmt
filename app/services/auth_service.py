@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -84,7 +85,9 @@ class AuthService:
 
     async def login(self, email: str, password: str, org_id: str | None, ip: str | None, user_agent: str | None):
         normalized = normalize_email(email)
-        result = await self.session.execute(select(User).where(User.normalized_email == normalized))
+        result = await self.session.execute(
+            select(User).options(selectinload(User.credential)).where(User.normalized_email == normalized)
+        )
         user = result.scalar_one_or_none()
         if not user or not user.credential:
             await self.audit_service.log_event(action="login_failed", metadata={"email": email})

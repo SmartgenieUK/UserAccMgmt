@@ -2,9 +2,22 @@ from __future__ import annotations
 
 import os
 import asyncio
+import sys
+import types
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+try:
+    import aiosmtplib  # type: ignore
+except ModuleNotFoundError:
+    aiosmtplib = types.ModuleType("aiosmtplib")
+
+    async def _fake_send(*args, **kwargs):
+        return {}
+
+    aiosmtplib.send = _fake_send  # type: ignore[attr-defined]
+    sys.modules["aiosmtplib"] = aiosmtplib
 
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test.db"
 os.environ["REDIS_REQUIRED"] = "false"
@@ -59,3 +72,11 @@ async def client(db_session):
     async with AsyncClient(app=app, base_url="http://test") as c:
         yield c
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def mock_email_delivery(monkeypatch):
+    async def _fake_send(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(aiosmtplib, "send", _fake_send, raising=False)

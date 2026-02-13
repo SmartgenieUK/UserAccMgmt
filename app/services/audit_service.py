@@ -29,7 +29,7 @@ class AuditService:
             action=action,
             ip_address=ip_address,
             user_agent=user_agent,
-            metadata=metadata or {},
+            event_metadata=metadata or {},
             created_at=utcnow(),
         )
         self.session.add(event)

@@ -16,7 +16,10 @@ class Invitation(Base):
     org_id: Mapped = mapped_column(UUID_TYPE, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     inviter_user_id: Mapped = mapped_column(UUID_TYPE, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
-    role: Mapped[Role] = mapped_column(Enum(Role), nullable=False)
+    role: Mapped[Role] = mapped_column(
+        Enum(Role, values_callable=lambda e: [i.value for i in e], name="role"),
+        nullable=False,
+    )
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped = mapped_column(DateTime(timezone=True), nullable=False)
     accepted_at: Mapped = mapped_column(DateTime(timezone=True), nullable=True)

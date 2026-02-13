@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
+from uuid import UUID
 from pydantic import EmailStr
 from app.schemas.common import APIModel
 
 
 class UserRead(APIModel):
-    id: str
+    id: UUID
     email: EmailStr
     display_name: str | None
     avatar_url: str | None
@@ -16,8 +18,8 @@ class UserRead(APIModel):
     is_verified: bool
     custom_fields: dict[str, Any]
     custom_schema_version: int
-    created_at: str
-    updated_at: str | None
+    created_at: datetime
+    updated_at: datetime | None
 
 
 class UserUpdate(APIModel):

@@ -71,21 +71,23 @@ resource "azurerm_postgresql_flexible_server" "this" {
   geo_redundant_backup_enabled = false
   public_network_access_enabled = var.postgres_public_network_access_enabled
 
+  lifecycle {
+    ignore_changes = [zone]
+  }
+
   tags = local.common_tags
 }
 
 resource "azurerm_postgresql_flexible_server_configuration" "require_secure_transport" {
-  name                = "require_secure_transport"
-  resource_group_name = azurerm_resource_group.this.name
-  server_name         = azurerm_postgresql_flexible_server.this.name
-  value               = "on"
+    name                = "require_secure_transport"
+    server_id           = azurerm_postgresql_flexible_server.this.id
+    value               = "on"
 }
 
 resource "azurerm_postgresql_flexible_server_configuration" "tls_min" {
-  name                = "ssl_min_protocol_version"
-  resource_group_name = azurerm_resource_group.this.name
-  server_name         = azurerm_postgresql_flexible_server.this.name
-  value               = "TLS1_2"
+    name                = "ssl_min_protocol_version"
+    server_id           = azurerm_postgresql_flexible_server.this.id
+    value               = "TLSv1.2"
 }
 
 resource "azurerm_postgresql_flexible_server_firewall_rule" "azure_services" {
@@ -121,7 +123,7 @@ resource "azurerm_redis_cache" "this" {
   family                        = local.redis_family
   sku_name                      = var.redis_sku
   minimum_tls_version           = "1.2"
-  enable_non_ssl_port           = false
+  non_ssl_port_enabled          = false
   public_network_access_enabled = true
 
   tags = local.common_tags

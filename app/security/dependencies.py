@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings, Settings
@@ -33,7 +34,9 @@ async def get_current_user(
     payload: TokenPayload = Depends(get_token_payload),
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    result = await session.execute(select(User).where(User.id == payload.sub))
+    result = await session.execute(
+        select(User).options(selectinload(User.credential)).where(User.id == payload.sub)
+    )
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive or not found")

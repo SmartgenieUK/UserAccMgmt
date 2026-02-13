@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from uuid import UUID
 from pydantic import EmailStr
 from app.schemas.common import APIModel
 
@@ -10,11 +12,11 @@ class OrganizationCreate(APIModel):
 
 
 class OrganizationRead(APIModel):
-    id: str
+    id: UUID
     name: str
     slug: str
     is_active: bool
-    created_at: str
+    created_at: datetime
 
 
 class MembershipRead(APIModel):

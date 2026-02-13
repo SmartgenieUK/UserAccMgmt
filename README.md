@@ -2,6 +2,10 @@
 
 Production-grade, reusable account and identity service built with FastAPI, PostgreSQL, Redis, and SQLAlchemy 2.0 async.
 
+## User Guide
+- See `docs/USER_GUIDE.md` for account lifecycle, organization workflows, admin actions, and API usage examples.
+- See `docs/DEPLOYMENT_GUIDE.md` for local Docker deployment, Azure IaC provisioning, and Container Apps rollout.
+
 ## Features
 - Email/password registration with verification
 - OAuth/OIDC for Google and Microsoft Entra ID

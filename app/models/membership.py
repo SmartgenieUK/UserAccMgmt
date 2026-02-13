@@ -15,7 +15,10 @@ class Membership(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=uuid.uuid4)
     user_id: Mapped = mapped_column(UUID_TYPE, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     org_id: Mapped = mapped_column(UUID_TYPE, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    role: Mapped[Role] = mapped_column(Enum(Role), nullable=False)
+    role: Mapped[Role] = mapped_column(
+        Enum(Role, values_callable=lambda e: [i.value for i in e], name="role"),
+        nullable=False,
+    )
     created_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
