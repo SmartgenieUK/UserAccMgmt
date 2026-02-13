@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+iac/.env
+
+# Local tooling / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Terraform local artifacts
+iac/.terraform/
+iac/.terraform.lock.hcl
+iac/*.tfstate
+iac/*.tfstate.*
+iac/.terraform.tfstate.lock.info
+iac/tfplan
+iac/crash.log
+
+# Build / logs
+*.log

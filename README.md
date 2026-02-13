@@ -2,7 +2,10 @@
 
 Production-grade, reusable account and identity service built with FastAPI, PostgreSQL, Redis, and SQLAlchemy 2.0 async.
 
-## User Guide
+## Documentation
+- See `docs/ARCHITECTURE_OVERVIEW.md` for system architecture, runtime flows, data model, and security design.
+- See `docs/IAC_ARCHITECTURE.md` for Terraform/Azure infrastructure architecture, resource graph, variables, and operations.
+- See `docs/OPERATIONAL_RUNBOOK.md` for day-2 operations, incident playbooks, rotations, and release/rollback procedures.
 - See `docs/USER_GUIDE.md` for account lifecycle, organization workflows, admin actions, and API usage examples.
 - See `docs/DEPLOYMENT_GUIDE.md` for local Docker deployment, Azure IaC provisioning, and Container Apps rollout.
 

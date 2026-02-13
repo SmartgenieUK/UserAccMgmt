@@ -6,6 +6,11 @@ This guide covers deployment of the Account & Identity Platform for:
 2. Azure infrastructure provisioning with Terraform
 3. Azure Container Apps runtime deployment
 
+For infrastructure architecture detail (resource graph, security model, variables, outputs), also see:
+
+- `docs/IAC_ARCHITECTURE.md`
+- `iac/README.md`
+
 ## 1. Prerequisites
 
 Install:
