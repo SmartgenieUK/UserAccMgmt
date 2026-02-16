@@ -1,0 +1,7 @@
+# Optional remote backend config per instance.
+# Copy to iac/instances/<instance-name>.backend.hcl and customize.
+
+resource_group_name  = "rg-terraform-state"
+storage_account_name = "stterraformstate001"
+container_name       = "tfstate"
+key                  = "useraccmgmt/app1-dev/terraform.tfstate"

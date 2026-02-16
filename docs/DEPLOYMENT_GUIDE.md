@@ -123,6 +123,53 @@ bash iac/destroy.sh
 
 The script includes a safety confirmation (`DESTROY`) and prints the resource group before deletion.
 
+### 3.4 Manage Multiple Independent Instances (Recommended)
+
+If you run multiple auth instances from one codebase (for example, `app1-dev`, `app2-prod`, `app3-stage`), use per-instance profiles under `iac/instances/`.
+
+#### Step A: Create one profile per instance
+
+```bash
+cp iac/instances/instance.env.example iac/instances/app1-dev.env
+cp iac/instances/instance.backend.hcl.example iac/instances/app1-dev.backend.hcl
+```
+
+Then edit:
+
+- `iac/instances/app1-dev.env` with subscription/tenant/env and optional `TF_VAR_*` overrides
+- `iac/instances/app1-dev.backend.hcl` with remote backend details and a unique `key`
+
+Do this for each instance (`app2-prod`, `app3-stage`, etc.).
+
+#### Step B: Deploy/update a specific instance
+
+```bash
+bash iac/deploy-instance.sh app1-dev
+```
+
+The script will:
+
+1. Load `iac/.env` defaults (if present)
+2. Load `iac/instances/app1-dev.env`
+3. Initialize Terraform (using `iac/instances/app1-dev.backend.hcl` when present)
+4. Select/create Terraform workspace `app1-dev`
+5. Apply only that instance workspace
+
+#### Step C: Destroy a specific instance
+
+```bash
+bash iac/destroy-instance.sh app1-dev
+```
+
+This requires explicit confirmation: `DESTROY-app1-dev`.
+
+#### Why this enables independent operations
+
+- Each instance has isolated config (`iac/instances/<instance>.env`)
+- Each instance can have isolated Terraform state (`<instance>.backend.hcl` + unique backend key)
+- Each instance has isolated workspace (`<instance>`)
+- You can deploy one instance without touching the others
+
 ## 4. Build and Push API Image
 
 Build image from repo root:

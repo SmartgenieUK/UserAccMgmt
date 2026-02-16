@@ -55,10 +55,22 @@ docker compose down
 bash iac/deploy.sh
 ```
 
+For independently managed instances:
+
+```bash
+bash iac/deploy-instance.sh <instance-name>
+```
+
 ### 3.4 Destroy Azure Infrastructure
 
 ```bash
 bash iac/destroy.sh
+```
+
+For independently managed instances:
+
+```bash
+bash iac/destroy-instance.sh <instance-name>
 ```
 
 ## 4. Release Runbook

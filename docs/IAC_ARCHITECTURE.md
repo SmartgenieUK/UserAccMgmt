@@ -33,8 +33,14 @@ It does not deploy app code revisions. App image rollout is intentionally separa
   - non-interactive init/apply flow
 - `iac/destroy.sh`
   - guarded destroy flow
+- `iac/deploy-instance.sh`
+  - per-instance init/workspace/apply flow
+- `iac/destroy-instance.sh`
+  - per-instance workspace destroy flow
 - `iac/env.example`
   - bootstrap for `TF_VAR_*` and required deployment IDs
+- `iac/instances/`
+  - per-instance env and backend templates (`*.example`)
 
 ## 3. Resource Graph
 
@@ -150,12 +156,21 @@ Destroy flow:
 
 - `iac/destroy.sh` requires explicit confirmation and prints target resource group.
 
+Multi-instance flow (recommended when running multiple app instances):
+
+1. Create `iac/instances/<instance>.env` from `iac/instances/instance.env.example`.
+2. Optional: create `iac/instances/<instance>.backend.hcl` from `iac/instances/instance.backend.hcl.example`.
+3. Run `bash iac/deploy-instance.sh <instance>`.
+4. The script selects or creates workspace `<instance>` and applies only that workspace.
+5. Destroy with `bash iac/destroy-instance.sh <instance>`.
+
 ## 9. State and Drift Management
 
 State:
 
 - local state is acceptable for local testing
 - remote backend is recommended for teams (Azure Storage backend with locking strategy)
+- per-instance backend keys + per-instance workspaces are recommended for independent instance lifecycle operations
 
 Drift handling:
 

@@ -20,6 +20,8 @@ env/
 .env.*
 !.env.example
 iac/.env
+iac/instances/*.env
+iac/instances/*.backend.hcl
 
 # Local tooling / OS
 .DS_Store

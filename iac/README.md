@@ -73,6 +73,31 @@ cp iac/env.example iac/.env
 
 3. Optional: adjust any `TF_VAR_*` values for SKU/capacity/features.
 
+## Multi-Instance (Independent) Operations
+
+If you need multiple independently managed auth instances from one repo, use the instance profile model in `iac/instances/`.
+
+1. Create per-instance files:
+```bash
+cp iac/instances/instance.env.example iac/instances/app1-dev.env
+cp iac/instances/instance.backend.hcl.example iac/instances/app1-dev.backend.hcl
+```
+
+2. Deploy/update one instance:
+```bash
+bash iac/deploy-instance.sh app1-dev
+```
+
+3. Destroy one instance:
+```bash
+bash iac/destroy-instance.sh app1-dev
+```
+
+This pattern gives:
+- per-instance config isolation (`iac/instances/<instance>.env`)
+- per-instance state isolation (backend config + unique state key)
+- per-instance execution isolation (Terraform workspace `<instance>`)
+
 ## Deploy
 
 Run from repo root:
