@@ -78,6 +78,18 @@ class AuthService:
         await self.session.commit()
         await self.email_service.send_verification_email(user.email, otp)
 
+    async def resend_verification(self, email: str) -> None:
+        normalized = normalize_email(email)
+        result = await self.session.execute(select(User).where(User.normalized_email == normalized))
+        user = result.scalar_one_or_none()
+        if not user or user.is_verified:
+            return  # Silent return to avoid user enumeration
+        await self._enforce_recipient_rate_limit(normalized)
+        otp = self.email_service.generate_otp()
+        await self._store_otp(normalized, otp, "email_verify")
+        await self.session.commit()
+        await self.email_service.send_verification_email(user.email, otp)
+
     async def verify_email(self, email: str, otp: str) -> None:
         normalized = normalize_email(email)
         await self._verify_otp(normalized, otp, "email_verify")

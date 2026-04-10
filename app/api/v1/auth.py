@@ -19,6 +19,7 @@ from app.schemas.auth import (
     ChangeEmailRequest,
     ChangeEmailConfirm,
     VerifyEmailRequest,
+    ResendVerificationRequest,
 )
 from app.schemas.common import MessageResponse
 from app.schemas.token import TokenPair
@@ -57,6 +58,28 @@ async def register(
         org_name=data.org_name,
     )
     return MessageResponse(message="Registration successful. Please verify your email.")
+
+
+@router.post("/resend-verification", response_model=MessageResponse)
+async def resend_verification(
+    data: ResendVerificationRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    settings=Depends(get_settings),
+    hooks=Depends(get_hooks),
+    _=Depends(rate_limit_dependency(limit=3, period_seconds=3600, key_prefix="resend_verify")),
+):
+    service = AuthService(
+        session=session,
+        settings=settings,
+        hooks=hooks,
+        token_service=TokenService(session, settings),
+        email_service=EmailService(settings),
+        audit_service=AuditService(session, settings),
+        redis=get_redis(request),
+    )
+    await service.resend_verification(data.email)
+    return MessageResponse(message="If the email exists and is unverified, a new code was sent")
 
 
 @router.post("/verify-email", response_model=MessageResponse)

@@ -55,6 +55,10 @@ class VerifyEmailRequest(APIModel):
     otp: str
 
 
+class ResendVerificationRequest(APIModel):
+    email: EmailStr
+
+
 class OAuthAuthorizeResponse(APIModel):
     authorization_url: str
     state: str

@@ -140,7 +140,10 @@
               <button class="btn" style="background:#334155;color:#94a3b8;white-space:nowrap;" onclick="pasteOtp('verify-otp')">Paste</button>
             </div>
           </div>
-          <button class="btn btn-primary" onclick="doVerifyEmail()">Verify</button>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button class="btn btn-primary" onclick="doVerifyEmail()">Verify</button>
+            <button class="btn" style="background:#334155;color:#94a3b8;" onclick="doResendVerification()">Resend Code</button>
+          </div>
         </div>
 
         <div id="p-pw-reset-req" class="hidden">
@@ -424,6 +427,10 @@
 
   function doVerifyEmail() {
     apiCall('POST', '/api/v1/verify-email', { email: val('verify-email'), otp: val('verify-otp') });
+  }
+
+  function doResendVerification() {
+    apiCall('POST', '/api/v1/resend-verification', { email: val('verify-email') });
   }
 
   function doPasswordResetReq() {
