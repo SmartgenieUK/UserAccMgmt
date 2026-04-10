@@ -48,6 +48,7 @@ class AuthService:
 
         await self.hooks.run_email_domain_checks(email)
         await self.hooks.run_password_policy(password)
+        await self._enforce_recipient_rate_limit(normalized)
 
         user = User(
             email=email,
@@ -154,6 +155,7 @@ class AuthService:
         user = result.scalar_one_or_none()
         if not user:
             return
+        await self._enforce_recipient_rate_limit(normalized)
         otp = self.email_service.generate_otp()
         await self._store_otp(normalized, otp, "password_reset")
         await self.session.commit()
@@ -192,6 +194,7 @@ class AuthService:
             raise ConflictError("Email already in use", code="email_exists")
 
         await self.hooks.run_email_domain_checks(new_email)
+        await self._enforce_recipient_rate_limit(normalized)
         otp = self.email_service.generate_otp()
         # Store OTP keyed by new email, with user_id in the value for lookup
         await self._store_otp(normalized, otp, "email_change", extra={"user_id": str(user.id), "new_email": new_email})
@@ -296,6 +299,18 @@ class AuthService:
         await self.redis.delete(redis_key)
         if return_data:
             return data
+
+    async def _enforce_recipient_rate_limit(self, normalized_email: str) -> None:
+        """Rate-limit outbound emails per recipient address to prevent abuse."""
+        if not self.redis:
+            return
+        from app.services.rate_limit_service import RateLimiter
+        limiter = RateLimiter(self.redis)
+        await limiter.hit(
+            f"email_recipient:{normalized_email}",
+            self.settings.RATE_LIMIT_EMAIL_PER_RECIPIENT_PER_HOUR,
+            3600,
+        )
 
     async def _create_default_org(self, user: User, org_name: str | None) -> Organization:
         name = org_name or f"{user.display_name or user.email}'s Org"

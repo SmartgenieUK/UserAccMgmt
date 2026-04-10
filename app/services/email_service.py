@@ -18,10 +18,24 @@ class EmailService:
         return "".join(secrets.choice(digits) for _ in range(self.settings.OTP_LENGTH))
 
     async def send_email(self, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> None:
+        self._validate_recipient_domain(to_email)
         if self.settings.EMAIL_PROVIDER == "acs":
             await self._send_via_acs(to_email, subject, text_body, html_body)
         else:
             await self._send_via_smtp(to_email, subject, text_body, html_body)
+
+    def _validate_recipient_domain(self, to_email: str) -> None:
+        """Block email sends to domains not in the allowlist (when configured)."""
+        if not self.settings.ALLOWED_EMAIL_DOMAINS:
+            return
+        domain = to_email.rsplit("@", 1)[-1].lower()
+        allowed = [d.lower() for d in self.settings.ALLOWED_EMAIL_DOMAINS]
+        if domain not in allowed:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Blocked email send to disallowed domain: %s (recipient: %s)", domain, to_email
+            )
+            raise ValueError(f"Email domain '{domain}' is not permitted")
 
     async def _send_via_acs(self, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> None:
         from azure.communication.email import EmailClient
