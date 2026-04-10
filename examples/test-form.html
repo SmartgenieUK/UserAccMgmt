@@ -53,6 +53,20 @@
     .log-entry .method.get { color: #34d399; }
     .log-entry .method.patch { color: #a78bfa; }
     .log-entry .method.delete { color: #f87171; }
+    .guide { font-size: 13px; line-height: 1.7; color: #cbd5e1; }
+    .guide h2 { font-size: 16px; color: #38bdf8; margin: 0 0 16px; }
+    .guide h3 { font-size: 14px; color: #e2e8f0; margin: 20px 0 8px; border-bottom: 1px solid #334155; padding-bottom: 4px; }
+    .guide p { margin: 6px 0; }
+    .guide ol, .guide ul { margin: 6px 0 6px 20px; }
+    .guide li { margin: 4px 0; }
+    .guide code { background: #1e293b; padding: 1px 5px; border-radius: 3px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; color: #38bdf8; }
+    .guide .callout { background: #1e293b; border-left: 3px solid #38bdf8; padding: 10px 14px; border-radius: 4px; margin: 10px 0; font-size: 12px; }
+    .guide .callout.warn { border-left-color: #fbbf24; }
+    .guide .callout.danger { border-left-color: #ef4444; }
+    .guide table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 12px; }
+    .guide th { text-align: left; background: #1e293b; padding: 6px 10px; color: #94a3b8; border: 1px solid #334155; }
+    .guide td { padding: 6px 10px; border: 1px solid #334155; }
+    .guide .scope-tag { display: inline-block; background: #334155; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin: 1px 2px; }
   </style>
 </head>
 <body>
@@ -73,6 +87,7 @@
 
 <div class="container">
   <nav class="sidebar">
+    <button onclick="showPanel('guide')" id="nav-guide" style="color:#38bdf8;font-weight:600;border-bottom:1px solid #334155;margin-bottom:4px;">User Guide</button>
     <h3>Public</h3>
     <button onclick="showPanel('health')" id="nav-health">Health Check</button>
     <button onclick="showPanel('register')" id="nav-register">Register</button>
@@ -114,6 +129,171 @@
   <div class="main">
     <div class="panel">
       <div class="form-panel">
+        <div id="p-guide" class="hidden guide" style="max-width:720px;">
+          <h2>CloudGenie Auth Platform - User Guide</h2>
+
+          <h3>Overview</h3>
+          <p>CloudGenie Auth is an <strong>Authentication-as-a-Service</strong> platform. It handles user identity, authentication, organizations, and OAuth2 client credentials so your applications can focus on their own domain logic.</p>
+          <div class="callout">This test console lets you exercise every API endpoint interactively. Tokens are stored in-browser and attached to authenticated requests automatically.</div>
+
+          <h3>Quick Start</h3>
+          <ol>
+            <li><strong>Test Connection</strong> &mdash; Click the <code>Test Connection</code> button in the top bar to verify the API is reachable.</li>
+            <li><strong>Register</strong> &mdash; Go to <code>Register</code>, enter an email and a strong password (min 12 chars, must include upper + lower + digit + special character). Optionally provide a display name and an organization name.</li>
+            <li><strong>Verify Email</strong> &mdash; Check your inbox for a 6-digit OTP code. Go to <code>Verify Email</code>, enter it, and click Verify. If the code expired, use <code>Resend Code</code>.</li>
+            <li><strong>Login</strong> &mdash; Go to <code>Login</code>, enter your credentials. On success, the access and refresh tokens are stored automatically (visible in the bottom bar).</li>
+            <li><strong>Use Authenticated Endpoints</strong> &mdash; All sidebar items under <em>Authenticated</em>, <em>Organizations</em>, <em>Applications</em>, and <em>Admin</em> will automatically include your access token.</li>
+          </ol>
+
+          <h3>Authentication Flows</h3>
+
+          <p><strong>Email + Password</strong></p>
+          <ol>
+            <li>Register &rarr; Verify Email (OTP) &rarr; Login &rarr; receive token pair</li>
+            <li>Access token is short-lived; use <code>Refresh Token</code> to get a new pair</li>
+            <li>Call <code>Logout</code> to invalidate the refresh token</li>
+          </ol>
+
+          <p><strong>OAuth (Google / Microsoft)</strong></p>
+          <ol>
+            <li>Click <code>Login with Google</code> or <code>Login with Microsoft</code></li>
+            <li>Complete consent in the popup window</li>
+            <li>On redirect, tokens are exchanged automatically. If it fails, use <code>OAuth Callback</code> to manually exchange the authorization code.</li>
+          </ol>
+
+          <p><strong>Client Credentials (App-to-App)</strong></p>
+          <ol>
+            <li>Register an Application under an organization (see below)</li>
+            <li>Use the <code>Client Token</code> panel with the issued <code>client_id</code> and <code>client_secret</code></li>
+            <li>The returned access token represents the application, not a user</li>
+          </ol>
+
+          <h3>Password Policy</h3>
+          <table>
+            <tr><th>Rule</th><th>Requirement</th></tr>
+            <tr><td>Minimum length</td><td>12 characters</td></tr>
+            <tr><td>Uppercase</td><td>At least 1</td></tr>
+            <tr><td>Lowercase</td><td>At least 1</td></tr>
+            <tr><td>Digit</td><td>At least 1</td></tr>
+            <tr><td>Special character</td><td>At least 1</td></tr>
+          </table>
+
+          <h3>Password Reset</h3>
+          <ol>
+            <li>Go to <code>Password Reset Request</code> and enter the account email</li>
+            <li>Check your inbox for a 6-digit OTP</li>
+            <li>Go to <code>Password Reset Confirm</code>, enter email + OTP + new password</li>
+          </ol>
+          <div class="callout warn">Password reset OTPs expire after 15 minutes. Rate limited to 5 requests per hour.</div>
+
+          <h3>Token Management</h3>
+          <table>
+            <tr><th>Token</th><th>Purpose</th><th>Lifetime</th></tr>
+            <tr><td>Access Token</td><td>Authenticates API requests (sent as <code>Bearer</code> header)</td><td>Short-lived (configurable, default 30 min)</td></tr>
+            <tr><td>Refresh Token</td><td>Exchanges for a new access token without re-login</td><td>Longer-lived (configurable, default 7 days)</td></tr>
+          </table>
+          <p>The bottom bar shows truncated tokens. Click <code>Clear Tokens</code> to wipe them from the console.</p>
+
+          <h3>Organizations</h3>
+          <p>Organizations are multi-tenant containers. Every user belongs to at least one.</p>
+          <ul>
+            <li><strong>Create Org</strong> &mdash; Creates a new organization. You become its Admin.</li>
+            <li><strong>List Orgs</strong> &mdash; Shows all organizations you belong to.</li>
+            <li><strong>Invite User</strong> &mdash; Sends an email invitation to join your org (Admin only).</li>
+            <li><strong>Accept Invitation</strong> &mdash; Paste the invitation token to join an org.</li>
+          </ul>
+          <div class="callout">When logging in, you can optionally pass an <code>Org ID</code> to scope your session to that organization. This affects the <code>org_id</code> claim in your access token.</div>
+
+          <h3>Applications (OAuth2 Clients)</h3>
+          <p>Register external applications that authenticate via client credentials. This is how consuming apps integrate with the platform.</p>
+          <ul>
+            <li><strong>Register App</strong> &mdash; Creates a new application under an org. Returns a <code>client_id</code> (prefix <code>cg_</code>) and <code>client_secret</code> (prefix <code>cgs_</code>).</li>
+            <li><strong>List Apps</strong> &mdash; Shows all applications registered under an org.</li>
+            <li><strong>Rotate Secret</strong> &mdash; Generates a new client secret and invalidates the old one.</li>
+            <li><strong>Delete App</strong> &mdash; Permanently removes an application.</li>
+            <li><strong>Client Token</strong> &mdash; Exchanges <code>client_id</code> + <code>client_secret</code> for an access token.</li>
+          </ul>
+          <div class="callout danger">The <code>client_secret</code> is only shown once at creation (or rotation). Store it securely &mdash; it cannot be retrieved later.</div>
+
+          <h3>Scopes &amp; Permissions</h3>
+          <p>Access is controlled by scopes embedded in the JWT. Users get scopes based on their role; apps get scopes set at registration time.</p>
+          <table>
+            <tr><th>Role</th><th>Scopes</th></tr>
+            <tr><td>Admin</td><td>
+              <span class="scope-tag">profile:read</span><span class="scope-tag">profile:write</span><span class="scope-tag">orgs:read</span><span class="scope-tag">orgs:write</span><span class="scope-tag">invitations:write</span><span class="scope-tag">users:read</span><span class="scope-tag">users:write</span><span class="scope-tag">apps:read</span><span class="scope-tag">apps:write</span><span class="scope-tag">admin:users:read</span><span class="scope-tag">admin:users:write</span>
+            </td></tr>
+            <tr><td>Member</td><td>
+              <span class="scope-tag">profile:read</span><span class="scope-tag">profile:write</span><span class="scope-tag">orgs:read</span><span class="scope-tag">users:read</span><span class="scope-tag">apps:read</span>
+            </td></tr>
+            <tr><td>Read-only</td><td>
+              <span class="scope-tag">profile:read</span><span class="scope-tag">orgs:read</span><span class="scope-tag">users:read</span><span class="scope-tag">apps:read</span>
+            </td></tr>
+          </table>
+          <p>When requesting a <strong>Client Token</strong>, you can optionally request specific scopes. The granted scopes will be the intersection of what you request and what the application is allowed.</p>
+
+          <h3>Admin Operations</h3>
+          <p>Admin endpoints require an access token with <code>admin:users:read</code> or <code>admin:users:write</code> scopes (Admin role only).</p>
+          <ul>
+            <li><strong>List Users</strong> &mdash; View all users across the platform.</li>
+            <li><strong>Disable/Enable User</strong> &mdash; Suspend or reactivate a user account by UUID.</li>
+          </ul>
+
+          <h3>Rate Limits</h3>
+          <table>
+            <tr><th>Endpoint</th><th>Limit</th></tr>
+            <tr><td>Register</td><td>5 per hour</td></tr>
+            <tr><td>Login</td><td>10 per minute</td></tr>
+            <tr><td>Password Reset</td><td>5 per hour</td></tr>
+            <tr><td>Resend Verification</td><td>3 per hour</td></tr>
+            <tr><td>Client Token</td><td>30 per minute</td></tr>
+            <tr><td>Global (all endpoints)</td><td>60 per minute per IP</td></tr>
+          </table>
+
+          <h3>API Endpoints Reference</h3>
+          <table>
+            <tr><th>Method</th><th>Endpoint</th><th>Auth</th><th>Description</th></tr>
+            <tr><td>GET</td><td><code>/api/v1/health</code></td><td>No</td><td>Health check</td></tr>
+            <tr><td>GET</td><td><code>/api/v1/ready</code></td><td>No</td><td>Readiness check (DB + Redis)</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/register</code></td><td>No</td><td>Create account</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/verify-email</code></td><td>No</td><td>Verify email with OTP</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/resend-verification</code></td><td>No</td><td>Resend verification OTP</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/login</code></td><td>No</td><td>Login, returns token pair</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/refresh</code></td><td>No</td><td>Refresh token pair</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/logout</code></td><td>No</td><td>Invalidate refresh token</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/password-reset/request</code></td><td>No</td><td>Request password reset OTP</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/password-reset/confirm</code></td><td>No</td><td>Confirm reset with OTP</td></tr>
+            <tr><td>GET</td><td><code>/api/v1/me</code></td><td>Yes</td><td>Get current user profile</td></tr>
+            <tr><td>PATCH</td><td><code>/api/v1/me</code></td><td>Yes</td><td>Update profile</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/change-password</code></td><td>Yes</td><td>Change password</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/orgs</code></td><td>Yes</td><td>Create organization</td></tr>
+            <tr><td>GET</td><td><code>/api/v1/orgs</code></td><td>Yes</td><td>List my organizations</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/orgs/:id/invite</code></td><td>Yes</td><td>Invite user to org</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/invitations/accept</code></td><td>Yes</td><td>Accept invitation</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/orgs/:id/apps</code></td><td>Yes</td><td>Register application</td></tr>
+            <tr><td>GET</td><td><code>/api/v1/orgs/:id/apps</code></td><td>Yes</td><td>List applications</td></tr>
+            <tr><td>PATCH</td><td><code>/api/v1/orgs/:id/apps/:appId</code></td><td>Yes</td><td>Update application</td></tr>
+            <tr><td>DELETE</td><td><code>/api/v1/orgs/:id/apps/:appId</code></td><td>Yes</td><td>Delete application</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/orgs/:id/apps/:appId/rotate-secret</code></td><td>Yes</td><td>Rotate client secret</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/auth/token</code></td><td>No</td><td>Client credentials token</td></tr>
+            <tr><td>GET</td><td><code>/api/v1/oauth/:provider/authorize</code></td><td>No</td><td>Start OAuth flow</td></tr>
+            <tr><td>POST</td><td><code>/api/v1/oauth/:provider/callback</code></td><td>No</td><td>Exchange OAuth code</td></tr>
+            <tr><td>GET</td><td><code>/api/v1/admin/users</code></td><td>Admin</td><td>List all users</td></tr>
+            <tr><td>PATCH</td><td><code>/api/v1/admin/users/:id/disable</code></td><td>Admin</td><td>Disable/enable user</td></tr>
+          </table>
+
+          <h3>Troubleshooting</h3>
+          <table>
+            <tr><th>Error</th><th>Cause</th><th>Fix</th></tr>
+            <tr><td><code>email_exists</code></td><td>Email already registered</td><td>Use Verify Email + Resend Code if not yet verified, or Login if already verified</td></tr>
+            <tr><td><code>invalid_credentials</code></td><td>Wrong email or password</td><td>Double-check credentials, or reset password</td></tr>
+            <tr><td><code>email_not_verified</code></td><td>Account exists but email not confirmed</td><td>Go to Verify Email, use Resend Code if needed</td></tr>
+            <tr><td><code>token_expired</code></td><td>Access token has expired</td><td>Use Refresh Token to get a new one</td></tr>
+            <tr><td><code>insufficient_scope</code></td><td>Your role doesn't have the required scope</td><td>Log in as an Admin or request proper scopes</td></tr>
+            <tr><td><code>rate_limit_exceeded</code></td><td>Too many requests</td><td>Wait and retry after the cooldown period</td></tr>
+            <tr><td><code>CORS / Network Error</code></td><td>API unreachable or origin blocked</td><td>Check the API Base URL and that the server is running</td></tr>
+          </table>
+        </div>
+
         <div id="p-health">
           <h2>Health Check</h2>
           <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/health')">Check Health</button>
@@ -554,7 +734,7 @@
 
   // Auto-check health on load
   checkHealth();
-  showPanel('health');
+  showPanel('guide');
 </script>
 
 </body>
