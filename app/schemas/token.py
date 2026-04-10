@@ -11,11 +11,20 @@ class TokenPair(APIModel):
     expires_in: int = Field(..., description="Access token lifetime in seconds")
 
 
+class ClientTokenResponse(APIModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = Field(..., description="Access token lifetime in seconds")
+    scopes: list[str]
+
+
 class TokenPayload(APIModel):
     sub: str
-    email: str
-    role: str
-    org_id: str
-    scopes: list[str]
-    iat: int
-    exp: int
+    email: str = ""
+    role: str = ""
+    org_id: str = ""
+    scopes: list[str] = []
+    token_type: str = "user"  # "user" or "client"
+    client_id: str | None = None
+    iat: int = 0
+    exp: int = 0

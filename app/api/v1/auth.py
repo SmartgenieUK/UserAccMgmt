@@ -22,7 +22,8 @@ from app.schemas.auth import (
     ResendVerificationRequest,
 )
 from app.schemas.common import MessageResponse
-from app.schemas.token import TokenPair
+from app.schemas.token import TokenPair, ClientTokenResponse
+from app.schemas.application import ClientCredentialsRequest
 from app.security.dependencies import get_current_user
 from app.security.csrf import validate_csrf_token
 from app.services.auth_service import AuthService
@@ -294,3 +295,32 @@ async def change_email_confirm(
     )
     await service.confirm_email_change(data.new_email, data.otp)
     return MessageResponse(message="Email updated")
+
+
+@router.post("/auth/token", response_model=ClientTokenResponse)
+async def client_credentials_token(
+    data: ClientCredentialsRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    settings=Depends(get_settings),
+    _=Depends(rate_limit_dependency(limit=30, period_seconds=60, key_prefix="client_auth")),
+):
+    from app.services.application_service import ApplicationService
+    from app.security.jwt import create_client_access_token
+
+    service = ApplicationService(session, settings)
+    app = await service.authenticate_client(data.client_id, data.client_secret)
+
+    # Intersect requested scopes with allowed scopes (or use all allowed if none requested)
+    if data.scopes:
+        granted = [s for s in data.scopes if s in app.allowed_scopes]
+    else:
+        granted = list(app.allowed_scopes)
+
+    token, expires_in = create_client_access_token(
+        settings=settings,
+        client_id=app.client_id,
+        org_id=str(app.org_id),
+        scopes=granted,
+    )
+    return ClientTokenResponse(access_token=token, expires_in=expires_in, scopes=granted)

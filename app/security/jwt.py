@@ -30,5 +30,26 @@ def create_access_token(
     return token, int(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
+def create_client_access_token(
+    settings: Settings,
+    client_id: str,
+    org_id: str,
+    scopes: list[str],
+) -> tuple[str, int]:
+    now = utcnow()
+    expires = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": client_id,
+        "org_id": org_id,
+        "scopes": scopes,
+        "token_type": "client",
+        "client_id": client_id,
+        "iat": int(now.timestamp()),
+        "exp": int(expires.timestamp()),
+    }
+    token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    return token, int(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+
+
 def decode_access_token(settings: Settings, token: str) -> dict:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])

@@ -7,6 +7,7 @@ from .verification_token import VerificationToken
 from .organization import Organization
 from .membership import Membership
 from .invitation import Invitation
+from .application import Application
 from .audit_event import AuditEvent
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "Organization",
     "Membership",
     "Invitation",
+    "Application",
     "AuditEvent",
 ]

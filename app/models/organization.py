@@ -19,3 +19,4 @@ class Organization(Base):
 
     memberships = relationship("Membership", back_populates="organization", cascade="all, delete-orphan")
     invitations = relationship("Invitation", back_populates="organization", cascade="all, delete-orphan")
+    applications = relationship("Application", back_populates="organization", cascade="all, delete-orphan")

@@ -99,6 +99,13 @@
     <button onclick="showPanel('invite')" id="nav-invite">Invite User</button>
     <button onclick="showPanel('accept-invite')" id="nav-accept-invite">Accept Invitation</button>
 
+    <h3>Applications</h3>
+    <button onclick="showPanel('create-app')" id="nav-create-app">Register App</button>
+    <button onclick="showPanel('list-apps')" id="nav-list-apps">List Apps</button>
+    <button onclick="showPanel('rotate-secret')" id="nav-rotate-secret">Rotate Secret</button>
+    <button onclick="showPanel('delete-app')" id="nav-delete-app">Delete App</button>
+    <button onclick="showPanel('client-token')" id="nav-client-token">Client Token</button>
+
     <h3>Admin</h3>
     <button onclick="showPanel('admin-users')" id="nav-admin-users">List Users</button>
     <button onclick="showPanel('admin-disable')" id="nav-admin-disable">Disable/Enable User</button>
@@ -247,6 +254,44 @@
           <h2>Accept Invitation</h2>
           <div class="field"><label>Invitation Token</label><input type="text" id="accept-token" placeholder="Token from invite" /></div>
           <button class="btn btn-primary" onclick="doAcceptInvite()">Accept</button>
+        </div>
+
+        <div id="p-create-app" class="hidden">
+          <h2>Register Application</h2>
+          <div class="field"><label>Organization ID</label><input type="text" id="app-org" placeholder="UUID" /></div>
+          <div class="field"><label>App Name</label><input type="text" id="app-name" placeholder="My SaaS App" /></div>
+          <div class="field"><label>Redirect URIs (comma-separated)</label><input type="text" id="app-redirects" placeholder="https://myapp.com/callback" /></div>
+          <div class="field"><label>Allowed Scopes (comma-separated)</label><input type="text" id="app-scopes" placeholder="profile:read,orgs:read" /></div>
+          <button class="btn btn-primary" onclick="doCreateApp()">Register App</button>
+        </div>
+
+        <div id="p-list-apps" class="hidden">
+          <h2>List Applications</h2>
+          <div class="field"><label>Organization ID</label><input type="text" id="list-apps-org" placeholder="UUID" /></div>
+          <button class="btn btn-primary" onclick="doListApps()">Fetch Apps</button>
+        </div>
+
+        <div id="p-rotate-secret" class="hidden">
+          <h2>Rotate Client Secret</h2>
+          <div class="field"><label>Organization ID</label><input type="text" id="rotate-org" placeholder="UUID" /></div>
+          <div class="field"><label>Application ID</label><input type="text" id="rotate-app-id" placeholder="UUID" /></div>
+          <button class="btn btn-danger" onclick="doRotateSecret()">Rotate Secret</button>
+        </div>
+
+        <div id="p-delete-app" class="hidden">
+          <h2>Delete Application</h2>
+          <div class="field"><label>Organization ID</label><input type="text" id="del-app-org" placeholder="UUID" /></div>
+          <div class="field"><label>Application ID</label><input type="text" id="del-app-id" placeholder="UUID" /></div>
+          <button class="btn btn-danger" onclick="doDeleteApp()">Delete</button>
+        </div>
+
+        <div id="p-client-token" class="hidden">
+          <h2>Client Credentials Token</h2>
+          <p style="font-size:13px; color:#94a3b8; margin-bottom:12px;">Authenticate as an application (no user context). This is how consuming apps get tokens.</p>
+          <div class="field"><label>Client ID</label><input type="text" id="ct-client-id" placeholder="cg_..." /></div>
+          <div class="field"><label>Client Secret</label><input type="password" id="ct-client-secret" placeholder="cgs_..." /></div>
+          <div class="field"><label>Scopes (comma-separated, optional)</label><input type="text" id="ct-scopes" placeholder="profile:read,orgs:read" /></div>
+          <button class="btn btn-primary" onclick="doClientToken()">Get Token</button>
         </div>
 
         <div id="p-admin-users" class="hidden">
@@ -473,6 +518,31 @@
 
   function doAcceptInvite() {
     apiCall('POST', '/api/v1/invitations/accept', { token: val('accept-token') }, true);
+  }
+
+  function doCreateApp() {
+    const redirects = val('app-redirects') ? val('app-redirects').split(',').map(s => s.trim()).filter(Boolean) : [];
+    const scopes = val('app-scopes') ? val('app-scopes').split(',').map(s => s.trim()).filter(Boolean) : [];
+    apiCall('POST', '/api/v1/orgs/' + val('app-org') + '/apps', { name: val('app-name'), redirect_uris: redirects, allowed_scopes: scopes }, true);
+  }
+
+  function doListApps() {
+    apiCall('GET', '/api/v1/orgs/' + val('list-apps-org') + '/apps', null, true);
+  }
+
+  function doRotateSecret() {
+    apiCall('POST', '/api/v1/orgs/' + val('rotate-org') + '/apps/' + val('rotate-app-id') + '/rotate-secret', null, true);
+  }
+
+  function doDeleteApp() {
+    apiCall('DELETE', '/api/v1/orgs/' + val('del-app-org') + '/apps/' + val('del-app-id'), null, true);
+  }
+
+  function doClientToken() {
+    const scopes = val('ct-scopes') ? val('ct-scopes').split(',').map(s => s.trim()).filter(Boolean) : null;
+    const body = { client_id: val('ct-client-id'), client_secret: val('ct-client-secret') };
+    if (scopes) body.scopes = scopes;
+    apiCall('POST', '/api/v1/auth/token', body);
   }
 
   function doAdminDisable() {
