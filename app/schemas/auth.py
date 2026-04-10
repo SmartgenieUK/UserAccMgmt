@@ -30,7 +30,8 @@ class PasswordResetRequest(APIModel):
 
 
 class PasswordResetConfirm(APIModel):
-    token: str
+    email: EmailStr
+    otp: str
     new_password: str
 
 
@@ -45,11 +46,13 @@ class ChangeEmailRequest(APIModel):
 
 
 class ChangeEmailConfirm(APIModel):
-    token: str
+    new_email: EmailStr
+    otp: str
 
 
 class VerifyEmailRequest(APIModel):
-    token: str
+    email: EmailStr
+    otp: str
 
 
 class OAuthAuthorizeResponse(APIModel):

@@ -46,9 +46,11 @@ class OAuthStateStore:
 
     async def consume(self, state: str) -> OAuthState:
         if self.redis:
-            raw = await self.redis.getdel(f"oauth:state:{state}")
+            key = f"oauth:state:{state}"
+            raw = await self.redis.get(key)
             if not raw:
                 raise AuthError("Invalid OAuth state", code="oauth_state_invalid")
+            await self.redis.delete(key)
             payload = json.loads(raw)
             return OAuthState(code_verifier=payload["code_verifier"], redirect_uri=payload["redirect_uri"])
         data = self._memory.pop(state, None)

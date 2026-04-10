@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import secrets
+import string
 from email.message import EmailMessage
+
 import aiosmtplib
 
 from app.core.config import Settings
@@ -10,7 +13,31 @@ class EmailService:
     def __init__(self, settings: Settings):
         self.settings = settings
 
+    def generate_otp(self) -> str:
+        digits = string.digits
+        return "".join(secrets.choice(digits) for _ in range(self.settings.OTP_LENGTH))
+
     async def send_email(self, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> None:
+        if self.settings.EMAIL_PROVIDER == "acs":
+            await self._send_via_acs(to_email, subject, text_body, html_body)
+        else:
+            await self._send_via_smtp(to_email, subject, text_body, html_body)
+
+    async def _send_via_acs(self, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> None:
+        from azure.communication.email import EmailClient
+
+        client = EmailClient.from_connection_string(self.settings.ACS_CONNECTION_STRING)
+        message = {
+            "senderAddress": self.settings.EMAIL_FROM,
+            "recipients": {"to": [{"address": to_email}]},
+            "content": {"subject": subject, "plainText": text_body},
+        }
+        if html_body:
+            message["content"]["html"] = html_body
+        poller = client.begin_send(message)
+        poller.result()
+
+    async def _send_via_smtp(self, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> None:
         message = EmailMessage()
         message["From"] = self.settings.EMAIL_FROM
         message["To"] = to_email
@@ -29,22 +56,49 @@ class EmailService:
         )
 
     async def send_verification_email(self, to_email: str, token: str) -> None:
-        link = f"{self.settings.PUBLIC_BASE_URL}{self.settings.EMAIL_VERIFY_PATH}?token={token}"
-        text_body = f"Verify your email: {link}"
-        html_body = f"<p>Verify your email:</p><p><a href='{link}'>Verify Email</a></p>"
-        await self.send_email(to_email, "Verify your email", text_body, html_body)
+        otp = token  # token is now the OTP code
+        text_body = f"Your verification code is: {otp}\n\nThis code expires in {self.settings.OTP_EXPIRE_MINUTES} minutes."
+        html_body = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+            <h2 style="color: #1e293b;">Verify your email</h2>
+            <p style="color: #64748b;">Enter this code to verify your email address:</p>
+            <div style="background: #f1f5f9; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+                <span style="font-size: 32px; font-weight: 700; letter-spacing: 8px; color: #0f172a;">{otp}</span>
+            </div>
+            <p style="color: #94a3b8; font-size: 13px;">This code expires in {self.settings.OTP_EXPIRE_MINUTES} minutes. If you didn't request this, ignore this email.</p>
+        </div>
+        """
+        await self.send_email(to_email, f"Your verification code: {otp}", text_body, html_body)
 
     async def send_password_reset_email(self, to_email: str, token: str) -> None:
-        link = f"{self.settings.PUBLIC_BASE_URL}{self.settings.PASSWORD_RESET_PATH}?token={token}"
-        text_body = f"Reset your password: {link}"
-        html_body = f"<p>Reset your password:</p><p><a href='{link}'>Reset Password</a></p>"
-        await self.send_email(to_email, "Password reset", text_body, html_body)
+        otp = token
+        text_body = f"Your password reset code is: {otp}\n\nThis code expires in {self.settings.OTP_EXPIRE_MINUTES} minutes."
+        html_body = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+            <h2 style="color: #1e293b;">Reset your password</h2>
+            <p style="color: #64748b;">Enter this code to reset your password:</p>
+            <div style="background: #f1f5f9; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+                <span style="font-size: 32px; font-weight: 700; letter-spacing: 8px; color: #0f172a;">{otp}</span>
+            </div>
+            <p style="color: #94a3b8; font-size: 13px;">This code expires in {self.settings.OTP_EXPIRE_MINUTES} minutes. If you didn't request this, ignore this email.</p>
+        </div>
+        """
+        await self.send_email(to_email, f"Your password reset code: {otp}", text_body, html_body)
 
     async def send_email_change_email(self, to_email: str, token: str) -> None:
-        link = f"{self.settings.PUBLIC_BASE_URL}{self.settings.EMAIL_CHANGE_PATH}?token={token}"
-        text_body = f"Confirm your email change: {link}"
-        html_body = f"<p>Confirm your email change:</p><p><a href='{link}'>Confirm Email</a></p>"
-        await self.send_email(to_email, "Confirm email change", text_body, html_body)
+        otp = token
+        text_body = f"Your email change confirmation code is: {otp}\n\nThis code expires in {self.settings.OTP_EXPIRE_MINUTES} minutes."
+        html_body = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+            <h2 style="color: #1e293b;">Confirm email change</h2>
+            <p style="color: #64748b;">Enter this code to confirm your email change:</p>
+            <div style="background: #f1f5f9; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+                <span style="font-size: 32px; font-weight: 700; letter-spacing: 8px; color: #0f172a;">{otp}</span>
+            </div>
+            <p style="color: #94a3b8; font-size: 13px;">This code expires in {self.settings.OTP_EXPIRE_MINUTES} minutes. If you didn't request this, ignore this email.</p>
+        </div>
+        """
+        await self.send_email(to_email, f"Your email change code: {otp}", text_body, html_body)
 
     async def send_invitation_email(self, to_email: str, org_name: str, token: str) -> None:
         link = f"{self.settings.PUBLIC_BASE_URL}/accept-invite?token={token}"

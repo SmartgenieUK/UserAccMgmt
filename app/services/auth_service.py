@@ -30,6 +30,7 @@ class AuthService:
         token_service: TokenService,
         email_service: EmailService,
         audit_service: AuditService,
+        redis=None,
     ):
         self.session = session
         self.settings = settings
@@ -37,6 +38,7 @@ class AuthService:
         self.token_service = token_service
         self.email_service = email_service
         self.audit_service = audit_service
+        self.redis = redis
 
     async def register(self, email: str, password: str, display_name: str | None, org_name: str | None) -> None:
         normalized = normalize_email(email)
@@ -63,7 +65,8 @@ class AuthService:
         org = await self._create_default_org(user, org_name)
         self.session.add(Membership(user_id=user.id, org_id=org.id, role=Role.ADMIN))
 
-        token = await self._create_verification_token(user, VerificationTokenType.EMAIL_VERIFY)
+        otp = self.email_service.generate_otp()
+        await self._store_otp(normalized, otp, "email_verify")
 
         await self.audit_service.log_event(
             action="user_registered",
@@ -72,11 +75,13 @@ class AuthService:
         )
 
         await self.session.commit()
-        await self.email_service.send_verification_email(user.email, token)
+        await self.email_service.send_verification_email(user.email, otp)
 
-    async def verify_email(self, token: str) -> None:
-        record = await self._consume_token(token, VerificationTokenType.EMAIL_VERIFY)
-        user = await self.session.get(User, record.user_id)
+    async def verify_email(self, email: str, otp: str) -> None:
+        normalized = normalize_email(email)
+        await self._verify_otp(normalized, otp, "email_verify")
+        result = await self.session.execute(select(User).where(User.normalized_email == normalized))
+        user = result.scalar_one_or_none()
         if not user:
             raise ValidationError("User not found", code="user_not_found")
         user.is_verified = True
@@ -149,14 +154,17 @@ class AuthService:
         user = result.scalar_one_or_none()
         if not user:
             return
-        token = await self._create_verification_token(user, VerificationTokenType.PASSWORD_RESET)
+        otp = self.email_service.generate_otp()
+        await self._store_otp(normalized, otp, "password_reset")
         await self.session.commit()
-        await self.email_service.send_password_reset_email(user.email, token)
+        await self.email_service.send_password_reset_email(user.email, otp)
 
-    async def confirm_password_reset(self, token: str, new_password: str) -> None:
+    async def confirm_password_reset(self, email: str, otp: str, new_password: str) -> None:
         await self.hooks.run_password_policy(new_password)
-        record = await self._consume_token(token, VerificationTokenType.PASSWORD_RESET)
-        user = await self.session.get(User, record.user_id)
+        normalized = normalize_email(email)
+        await self._verify_otp(normalized, otp, "password_reset")
+        result = await self.session.execute(select(User).where(User.normalized_email == normalized))
+        user = result.scalar_one_or_none()
         if not user or not user.credential:
             raise ValidationError("User not found", code="user_not_found")
         user.credential.password_hash = hash_password(new_password)
@@ -184,19 +192,23 @@ class AuthService:
             raise ConflictError("Email already in use", code="email_exists")
 
         await self.hooks.run_email_domain_checks(new_email)
-        token = await self._create_verification_token(
-            user, VerificationTokenType.EMAIL_CHANGE, email=new_email
-        )
+        otp = self.email_service.generate_otp()
+        # Store OTP keyed by new email, with user_id in the value for lookup
+        await self._store_otp(normalized, otp, "email_change", extra={"user_id": str(user.id), "new_email": new_email})
         await self.session.commit()
-        await self.email_service.send_email_change_email(new_email, token)
+        await self.email_service.send_email_change_email(new_email, otp)
 
-    async def confirm_email_change(self, token: str) -> None:
-        record = await self._consume_token(token, VerificationTokenType.EMAIL_CHANGE)
-        user = await self.session.get(User, record.user_id)
-        if not user or not record.email:
+    async def confirm_email_change(self, new_email: str, otp: str) -> None:
+        normalized = normalize_email(new_email)
+        data = await self._verify_otp(normalized, otp, "email_change", return_data=True)
+        user_id = data.get("user_id") if data else None
+        if not user_id:
             raise ValidationError("Invalid email change token", code="email_change_invalid")
-        user.email = record.email
-        user.normalized_email = normalize_email(record.email)
+        user = await self.session.get(User, user_id)
+        if not user:
+            raise ValidationError("User not found", code="user_not_found")
+        user.email = new_email
+        user.normalized_email = normalized
         user.is_verified = True
         await self.audit_service.log_event(action="email_changed", user_id=str(user.id))
         await self.session.commit()
@@ -260,6 +272,30 @@ class AuthService:
         credential.failed_login_attempts = 0
         credential.lockout_until = None
         credential.last_login_at = utcnow()
+
+    async def _store_otp(self, key: str, otp: str, purpose: str, extra: dict | None = None) -> None:
+        import json
+        redis_key = f"otp:{purpose}:{key}"
+        value = {"otp": otp}
+        if extra:
+            value.update(extra)
+        if self.redis:
+            await self.redis.setex(redis_key, self.settings.OTP_EXPIRE_MINUTES * 60, json.dumps(value))
+
+    async def _verify_otp(self, key: str, otp: str, purpose: str, return_data: bool = False):
+        import json
+        redis_key = f"otp:{purpose}:{key}"
+        if not self.redis:
+            raise ValidationError("OTP verification unavailable", code="otp_unavailable")
+        raw = await self.redis.get(redis_key)
+        if not raw:
+            raise ValidationError("Invalid or expired code", code="otp_invalid")
+        data = json.loads(raw)
+        if data.get("otp") != otp:
+            raise ValidationError("Invalid code", code="otp_invalid")
+        await self.redis.delete(redis_key)
+        if return_data:
+            return data
 
     async def _create_default_org(self, user: User, org_name: str | None) -> Organization:
         name = org_name or f"{user.display_name or user.email}'s Org"

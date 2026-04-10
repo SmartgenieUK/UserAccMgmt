@@ -38,12 +38,17 @@ class Settings(BaseSettings):
     COOKIE_NAME_REFRESH: str = "refresh_token"
     COOKIE_NAME_CSRF: str = "csrf_token"
 
-    SMTP_HOST: str
+    SMTP_HOST: str = ""
     SMTP_PORT: int = 587
-    SMTP_USER: str
-    SMTP_PASSWORD: str
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
     SMTP_USE_TLS: bool = True
-    EMAIL_FROM: str
+    EMAIL_FROM: str = "DoNotReply@7ec7c562-c70c-4a9b-a549-6527452b67c2.azurecomm.net"
+
+    EMAIL_PROVIDER: str = "acs"  # "smtp" or "acs"
+    ACS_CONNECTION_STRING: str = ""
+    OTP_LENGTH: int = 6
+    OTP_EXPIRE_MINUTES: int = 10
 
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None

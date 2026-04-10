@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Auth Platform - Test Console</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+    header { background: #1e293b; padding: 16px 24px; border-bottom: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 18px; color: #38bdf8; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .status .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+    .status .dot.ok { background: #22c55e; }
+    .container { display: flex; height: calc(100vh - 57px); }
+    .sidebar { width: 240px; background: #1e293b; border-right: 1px solid #334155; padding: 12px 0; overflow-y: auto; flex-shrink: 0; }
+    .sidebar h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #64748b; padding: 8px 16px 4px; }
+    .sidebar button { display: block; width: 100%; text-align: left; background: none; border: none; color: #cbd5e1; padding: 8px 16px; font-size: 13px; cursor: pointer; }
+    .sidebar button:hover { background: #334155; }
+    .sidebar button.active { background: #0f172a; color: #38bdf8; border-left: 2px solid #38bdf8; }
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .panel { display: flex; flex: 1; overflow: hidden; }
+    .form-panel { flex: 1; padding: 24px; overflow-y: auto; border-right: 1px solid #334155; }
+    .response-panel { flex: 1; padding: 24px; overflow-y: auto; }
+    .form-panel h2, .response-panel h2 { font-size: 15px; color: #94a3b8; margin-bottom: 16px; }
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 4px; }
+    .field input { width: 100%; padding: 8px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; font-size: 13px; }
+    .field input:focus { outline: none; border-color: #38bdf8; }
+    .field small { color: #64748b; font-size: 11px; }
+    .btn { padding: 8px 20px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-primary:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-danger:hover { background: #b91c1c; }
+    .response-box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 16px; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; min-height: 120px; max-height: 500px; overflow-y: auto; }
+    .response-box.error { border-color: #ef4444; color: #fca5a5; }
+    .response-box.success { border-color: #22c55e; color: #bbf7d0; }
+    .response-meta { display: flex; gap: 16px; margin-bottom: 8px; font-size: 11px; color: #64748b; }
+    .response-meta span { display: flex; align-items: center; gap: 4px; }
+    .token-bar { background: #1e293b; padding: 8px 16px; border-top: 1px solid #334155; font-size: 11px; color: #64748b; display: flex; align-items: center; gap: 12px; }
+    .token-bar strong { color: #94a3b8; }
+    .token-bar .token-val { color: #38bdf8; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hidden { display: none; }
+    .config-bar { background: #1e293b; padding: 10px 16px; border-bottom: 1px solid #334155; display: flex; align-items: center; gap: 12px; }
+    .config-bar label { font-size: 12px; color: #94a3b8; }
+    .config-bar input { padding: 6px 8px; background: #0f172a; border: 1px solid #334155; border-radius: 4px; color: #e2e8f0; font-size: 12px; flex: 1; }
+    .config-bar .btn { font-size: 11px; padding: 6px 12px; }
+    .log-entry { padding: 4px 0; border-bottom: 1px solid #1e293b; }
+    .log-entry .method { font-weight: 700; }
+    .log-entry .method.post { color: #fbbf24; }
+    .log-entry .method.get { color: #34d399; }
+    .log-entry .method.patch { color: #a78bfa; }
+    .log-entry .method.delete { color: #f87171; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>CloudGenie Auth - Test Console</h1>
+  <div class="status">
+    <span id="statusText">Disconnected</span>
+    <span class="dot" id="statusDot"></span>
+  </div>
+</header>
+
+<div class="config-bar">
+  <label>API Base URL:</label>
+  <input type="text" id="baseUrl" value="https://ca-auth-dev-rmqe8.braveforest-c553b990.uksouth.azurecontainerapps.io" />
+  <button class="btn btn-primary" onclick="checkHealth()">Test Connection</button>
+</div>
+
+<div class="container">
+  <nav class="sidebar">
+    <h3>Public</h3>
+    <button onclick="showPanel('health')" id="nav-health">Health Check</button>
+    <button onclick="showPanel('register')" id="nav-register">Register</button>
+    <button onclick="showPanel('login')" id="nav-login">Login</button>
+    <button onclick="showPanel('verify-email')" id="nav-verify-email">Verify Email</button>
+    <button onclick="showPanel('pw-reset-req')" id="nav-pw-reset-req">Password Reset Request</button>
+    <button onclick="showPanel('pw-reset-confirm')" id="nav-pw-reset-confirm">Password Reset Confirm</button>
+
+    <h3>OAuth</h3>
+    <button onclick="showPanel('oauth-google')" id="nav-oauth-google">Login with Google</button>
+    <button onclick="showPanel('oauth-microsoft')" id="nav-oauth-microsoft">Login with Microsoft</button>
+    <button onclick="showPanel('oauth-callback')" id="nav-oauth-callback">OAuth Callback</button>
+
+    <h3>Authenticated</h3>
+    <button onclick="showPanel('me')" id="nav-me">Get Profile</button>
+    <button onclick="showPanel('update-me')" id="nav-update-me">Update Profile</button>
+    <button onclick="showPanel('change-pw')" id="nav-change-pw">Change Password</button>
+    <button onclick="showPanel('refresh')" id="nav-refresh">Refresh Token</button>
+    <button onclick="showPanel('logout')" id="nav-logout">Logout</button>
+
+    <h3>Organizations</h3>
+    <button onclick="showPanel('create-org')" id="nav-create-org">Create Org</button>
+    <button onclick="showPanel('list-orgs')" id="nav-list-orgs">List Orgs</button>
+    <button onclick="showPanel('invite')" id="nav-invite">Invite User</button>
+    <button onclick="showPanel('accept-invite')" id="nav-accept-invite">Accept Invitation</button>
+
+    <h3>Admin</h3>
+    <button onclick="showPanel('admin-users')" id="nav-admin-users">List Users</button>
+    <button onclick="showPanel('admin-disable')" id="nav-admin-disable">Disable/Enable User</button>
+  </nav>
+
+  <div class="main">
+    <div class="panel">
+      <div class="form-panel">
+        <div id="p-health">
+          <h2>Health Check</h2>
+          <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/health')">Check Health</button>
+          <br/><br/>
+          <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/ready')">Check Readiness</button>
+        </div>
+
+        <div id="p-register" class="hidden">
+          <h2>Register New User</h2>
+          <div class="field"><label>Email</label><input type="email" id="reg-email" placeholder="user@example.com" /></div>
+          <div class="field"><label>Password</label><input type="password" id="reg-password" placeholder="Min 12 chars, upper+lower+digit+special" /><small>Must meet password policy</small></div>
+          <div class="field"><label>Display Name (optional)</label><input type="text" id="reg-display" placeholder="John Doe" /></div>
+          <div class="field"><label>Organization Name (optional)</label><input type="text" id="reg-org" placeholder="Create org on register" /></div>
+          <button class="btn btn-primary" onclick="doRegister()">Register</button>
+        </div>
+
+        <div id="p-login" class="hidden">
+          <h2>Login</h2>
+          <div class="field"><label>Email</label><input type="email" id="login-email" placeholder="user@example.com" /></div>
+          <div class="field"><label>Password</label><input type="password" id="login-password" /></div>
+          <div class="field"><label>Org ID (optional)</label><input type="text" id="login-org" placeholder="UUID of org to scope session" /></div>
+          <button class="btn btn-primary" onclick="doLogin()">Login</button>
+        </div>
+
+        <div id="p-verify-email" class="hidden">
+          <h2>Verify Email (OTP)</h2>
+          <div class="field"><label>Email</label><input type="email" id="verify-email" placeholder="user@example.com" /></div>
+          <div class="field"><label>OTP Code</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="text" id="verify-otp" placeholder="6-digit code from email" style="flex:1;font-size:18px;letter-spacing:6px;text-align:center;" maxlength="6" />
+              <button class="btn" style="background:#334155;color:#94a3b8;white-space:nowrap;" onclick="pasteOtp('verify-otp')">Paste</button>
+            </div>
+          </div>
+          <button class="btn btn-primary" onclick="doVerifyEmail()">Verify</button>
+        </div>
+
+        <div id="p-pw-reset-req" class="hidden">
+          <h2>Request Password Reset</h2>
+          <div class="field"><label>Email</label><input type="email" id="reset-email" placeholder="user@example.com" /></div>
+          <button class="btn btn-primary" onclick="doPasswordResetReq()">Send Reset Link</button>
+        </div>
+
+        <div id="p-pw-reset-confirm" class="hidden">
+          <h2>Confirm Password Reset (OTP)</h2>
+          <div class="field"><label>Email</label><input type="email" id="reset-confirm-email" placeholder="user@example.com" /></div>
+          <div class="field"><label>OTP Code</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="text" id="reset-otp" placeholder="6-digit code from email" style="flex:1;font-size:18px;letter-spacing:6px;text-align:center;" maxlength="6" />
+              <button class="btn" style="background:#334155;color:#94a3b8;white-space:nowrap;" onclick="pasteOtp('reset-otp')">Paste</button>
+            </div>
+          </div>
+          <div class="field"><label>New Password</label><input type="password" id="reset-new-pw" /></div>
+          <button class="btn btn-primary" onclick="doPasswordResetConfirm()">Reset Password</button>
+        </div>
+
+        <div id="p-oauth-google" class="hidden">
+          <h2>Login with Google</h2>
+          <p style="font-size:13px; color:#94a3b8; margin-bottom:12px;">Initiates Google OAuth flow. You'll be redirected to Google's consent screen.</p>
+          <button class="btn btn-primary" onclick="startOAuth('google')" style="background:#4285f4;">Continue with Google</button>
+        </div>
+
+        <div id="p-oauth-microsoft" class="hidden">
+          <h2>Login with Microsoft</h2>
+          <p style="font-size:13px; color:#94a3b8; margin-bottom:12px;">Initiates Microsoft OAuth flow. You'll be redirected to Microsoft's consent screen.</p>
+          <button class="btn btn-primary" onclick="startOAuth('microsoft')" style="background:#00a4ef;">Continue with Microsoft</button>
+        </div>
+
+        <div id="p-oauth-callback" class="hidden">
+          <h2>OAuth Callback (Manual)</h2>
+          <p style="font-size:13px; color:#94a3b8; margin-bottom:12px;">Manually exchange an OAuth code for tokens. Usually this happens automatically after redirect.</p>
+          <div class="field"><label>Provider</label>
+            <select id="oauth-cb-provider" style="padding:8px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:13px;">
+              <option value="google">Google</option>
+              <option value="microsoft">Microsoft</option>
+            </select>
+          </div>
+          <div class="field"><label>Authorization Code</label><input type="text" id="oauth-cb-code" placeholder="Code from redirect URL" /></div>
+          <div class="field"><label>State</label><input type="text" id="oauth-cb-state" placeholder="State from redirect URL" /></div>
+          <div class="field"><label>Redirect URI</label><input type="text" id="oauth-cb-redirect" placeholder="Must match the one used in authorize" /></div>
+          <button class="btn btn-primary" onclick="doOAuthCallback()">Exchange Code</button>
+        </div>
+
+        <div id="p-me" class="hidden">
+          <h2>Get My Profile</h2>
+          <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/me', null, true)">Fetch Profile</button>
+        </div>
+
+        <div id="p-update-me" class="hidden">
+          <h2>Update Profile</h2>
+          <div class="field"><label>Display Name</label><input type="text" id="upd-display" placeholder="New display name" /></div>
+          <div class="field"><label>Locale</label><input type="text" id="upd-locale" placeholder="e.g. en-GB" /></div>
+          <div class="field"><label>Timezone</label><input type="text" id="upd-tz" placeholder="e.g. Europe/London" /></div>
+          <button class="btn btn-primary" onclick="doUpdateMe()">Update</button>
+        </div>
+
+        <div id="p-change-pw" class="hidden">
+          <h2>Change Password</h2>
+          <div class="field"><label>Current Password</label><input type="password" id="chpw-current" /></div>
+          <div class="field"><label>New Password</label><input type="password" id="chpw-new" /></div>
+          <button class="btn btn-primary" onclick="doChangePw()">Change Password</button>
+        </div>
+
+        <div id="p-refresh" class="hidden">
+          <h2>Refresh Token</h2>
+          <p style="font-size:13px; color:#94a3b8; margin-bottom:12px;">Uses the stored refresh token to get a new access token.</p>
+          <button class="btn btn-primary" onclick="doRefresh()">Refresh</button>
+        </div>
+
+        <div id="p-logout" class="hidden">
+          <h2>Logout</h2>
+          <p style="font-size:13px; color:#94a3b8; margin-bottom:12px;">Invalidates the current refresh token.</p>
+          <button class="btn btn-danger" onclick="doLogout()">Logout</button>
+        </div>
+
+        <div id="p-create-org" class="hidden">
+          <h2>Create Organization</h2>
+          <div class="field"><label>Name</label><input type="text" id="org-name" placeholder="My Organization" /></div>
+          <div class="field"><label>Slug (optional)</label><input type="text" id="org-slug" placeholder="my-org" /></div>
+          <button class="btn btn-primary" onclick="doCreateOrg()">Create</button>
+        </div>
+
+        <div id="p-list-orgs" class="hidden">
+          <h2>List My Organizations</h2>
+          <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/orgs', null, true)">Fetch Orgs</button>
+        </div>
+
+        <div id="p-invite" class="hidden">
+          <h2>Invite User to Organization</h2>
+          <div class="field"><label>Organization ID</label><input type="text" id="inv-org" placeholder="UUID" /></div>
+          <div class="field"><label>User Email</label><input type="email" id="inv-email" placeholder="user@example.com" /></div>
+          <button class="btn btn-primary" onclick="doInvite()">Send Invite</button>
+        </div>
+
+        <div id="p-accept-invite" class="hidden">
+          <h2>Accept Invitation</h2>
+          <div class="field"><label>Invitation Token</label><input type="text" id="accept-token" placeholder="Token from invite" /></div>
+          <button class="btn btn-primary" onclick="doAcceptInvite()">Accept</button>
+        </div>
+
+        <div id="p-admin-users" class="hidden">
+          <h2>List All Users (Admin)</h2>
+          <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/admin/users', null, true)">Fetch Users</button>
+        </div>
+
+        <div id="p-admin-disable" class="hidden">
+          <h2>Disable / Enable User (Admin)</h2>
+          <div class="field"><label>User ID</label><input type="text" id="adm-user-id" placeholder="UUID" /></div>
+          <div class="field"><label>Disabled</label>
+            <select id="adm-disabled" style="padding:8px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:13px;">
+              <option value="true">Yes - Disable</option>
+              <option value="false">No - Enable</option>
+            </select>
+          </div>
+          <button class="btn btn-danger" onclick="doAdminDisable()">Apply</button>
+        </div>
+      </div>
+
+      <div class="response-panel">
+        <h2>Response</h2>
+        <div class="response-meta">
+          <span>Status: <strong id="resp-status">---</strong></span>
+          <span>Time: <strong id="resp-time">---</strong></span>
+          <span>Method: <strong id="resp-method">---</strong></span>
+        </div>
+        <div class="response-box" id="resp-body">Send a request to see the response here.</div>
+      </div>
+    </div>
+
+    <div class="token-bar">
+      <strong>Access Token:</strong>
+      <span class="token-val" id="display-access">None</span>
+      <strong style="margin-left:16px;">Refresh Token:</strong>
+      <span class="token-val" id="display-refresh">None</span>
+      <button class="btn" style="margin-left:auto; background:#334155; color:#94a3b8; font-size:11px;" onclick="clearTokens()">Clear Tokens</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  let accessToken = null;
+  let refreshToken = null;
+
+  function getBase() {
+    return document.getElementById('baseUrl').value.replace(/\/+$/, '');
+  }
+
+  function setTokens(access, refresh) {
+    accessToken = access;
+    refreshToken = refresh;
+    document.getElementById('display-access').textContent = access ? access.substring(0, 40) + '...' : 'None';
+    document.getElementById('display-refresh').textContent = refresh ? refresh.substring(0, 40) + '...' : 'None';
+  }
+
+  function clearTokens() {
+    setTokens(null, null);
+  }
+
+  function showPanel(name) {
+    document.querySelectorAll('.form-panel > div').forEach(d => d.classList.add('hidden'));
+    document.getElementById('p-' + name).classList.remove('hidden');
+    document.querySelectorAll('.sidebar button').forEach(b => b.classList.remove('active'));
+    const nav = document.getElementById('nav-' + name);
+    if (nav) nav.classList.add('active');
+  }
+
+  async function apiCall(method, path, body, auth) {
+    const url = getBase() + path;
+    const headers = { 'Content-Type': 'application/json' };
+    if (auth && accessToken) {
+      headers['Authorization'] = 'Bearer ' + accessToken;
+    }
+
+    const opts = { method, headers };
+    if (body && method !== 'GET') {
+      opts.body = JSON.stringify(body);
+    }
+
+    const respStatus = document.getElementById('resp-status');
+    const respTime = document.getElementById('resp-time');
+    const respMethod = document.getElementById('resp-method');
+    const respBody = document.getElementById('resp-body');
+
+    respStatus.textContent = '...';
+    respBody.textContent = 'Loading...';
+    respBody.className = 'response-box';
+    respMethod.textContent = method + ' ' + path;
+
+    const start = performance.now();
+    try {
+      const res = await fetch(url, opts);
+      const elapsed = Math.round(performance.now() - start);
+      respTime.textContent = elapsed + 'ms';
+      respStatus.textContent = res.status + ' ' + res.statusText;
+
+      let data;
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('json')) {
+        data = await res.json();
+      } else {
+        data = await res.text();
+      }
+
+      respBody.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+      respBody.className = 'response-box ' + (res.ok ? 'success' : 'error');
+
+      // Auto-store tokens from login/refresh responses
+      if (res.ok && data && data.access_token) {
+        setTokens(data.access_token, data.refresh_token || refreshToken);
+      }
+
+      return { ok: res.ok, data, status: res.status };
+    } catch (err) {
+      const elapsed = Math.round(performance.now() - start);
+      respTime.textContent = elapsed + 'ms';
+      respStatus.textContent = 'Error';
+      respBody.textContent = err.message;
+      respBody.className = 'response-box error';
+      return { ok: false, data: null };
+    }
+  }
+
+  async function checkHealth() {
+    showPanel('health');
+    const res = await apiCall('GET', '/api/v1/health');
+    const dot = document.getElementById('statusDot');
+    const text = document.getElementById('statusText');
+    if (res.ok) {
+      dot.classList.add('ok');
+      text.textContent = 'Connected';
+    } else {
+      dot.classList.remove('ok');
+      text.textContent = 'Disconnected';
+    }
+  }
+
+  async function startOAuth(provider) {
+    const res = await apiCall('GET', '/api/v1/oauth/' + provider + '/authorize');
+    if (res.ok && res.data && res.data.authorization_url) {
+      window.open(res.data.authorization_url, '_blank', 'width=600,height=700');
+    }
+  }
+
+  function doOAuthCallback() {
+    const provider = document.getElementById('oauth-cb-provider').value;
+    const body = {
+      code: val('oauth-cb-code'),
+      state: val('oauth-cb-state'),
+      redirect_uri: val('oauth-cb-redirect'),
+    };
+    apiCall('POST', '/api/v1/oauth/' + provider + '/callback', body);
+  }
+
+  function doRegister() {
+    const body = { email: val('reg-email'), password: val('reg-password') };
+    const dn = val('reg-display'); if (dn) body.display_name = dn;
+    const org = val('reg-org'); if (org) body.org_name = org;
+    apiCall('POST', '/api/v1/register', body);
+  }
+
+  function doLogin() {
+    const body = { email: val('login-email'), password: val('login-password') };
+    const org = val('login-org'); if (org) body.org_id = org;
+    apiCall('POST', '/api/v1/login', body);
+  }
+
+  async function pasteOtp(inputId) {
+    try {
+      const text = await navigator.clipboard.readText();
+      document.getElementById(inputId).value = text.trim();
+    } catch (e) {
+      // Fallback: focus the input so user can Ctrl+V
+      document.getElementById(inputId).focus();
+    }
+  }
+
+  function doVerifyEmail() {
+    apiCall('POST', '/api/v1/verify-email', { email: val('verify-email'), otp: val('verify-otp') });
+  }
+
+  function doPasswordResetReq() {
+    apiCall('POST', '/api/v1/password-reset/request', { email: val('reset-email') });
+  }
+
+  function doPasswordResetConfirm() {
+    apiCall('POST', '/api/v1/password-reset/confirm', { email: val('reset-confirm-email'), otp: val('reset-otp'), new_password: val('reset-new-pw') });
+  }
+
+  function doChangePw() {
+    apiCall('POST', '/api/v1/change-password', { current_password: val('chpw-current'), new_password: val('chpw-new') }, true);
+  }
+
+  function doRefresh() {
+    apiCall('POST', '/api/v1/refresh', { refresh_token: refreshToken });
+  }
+
+  function doLogout() {
+    apiCall('POST', '/api/v1/logout', { refresh_token: refreshToken }, true).then(() => clearTokens());
+  }
+
+  function doUpdateMe() {
+    const body = {};
+    const dn = val('upd-display'); if (dn) body.display_name = dn;
+    const loc = val('upd-locale'); if (loc) body.locale = loc;
+    const tz = val('upd-tz'); if (tz) body.timezone = tz;
+    apiCall('PATCH', '/api/v1/me', body, true);
+  }
+
+  function doCreateOrg() {
+    const body = { name: val('org-name') };
+    const slug = val('org-slug'); if (slug) body.slug = slug;
+    apiCall('POST', '/api/v1/orgs', body, true);
+  }
+
+  function doInvite() {
+    apiCall('POST', '/api/v1/orgs/' + val('inv-org') + '/invite', { email: val('inv-email') }, true);
+  }
+
+  function doAcceptInvite() {
+    apiCall('POST', '/api/v1/invitations/accept', { token: val('accept-token') }, true);
+  }
+
+  function doAdminDisable() {
+    const disabled = document.getElementById('adm-disabled').value === 'true';
+    apiCall('PATCH', '/api/v1/admin/users/' + val('adm-user-id') + '/disable', { disabled }, true);
+  }
+
+  function val(id) { return document.getElementById(id).value.trim(); }
+
+  // Auto-check health on load
+  checkHealth();
+  showPanel('health');
+</script>
+
+</body>
+</html>

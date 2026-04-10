@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_hooks, rate_limit_dependency
 from app.core.config import get_settings
+from app.db.redis import get_redis
 from app.db.session import get_session
 from app.schemas.auth import (
     RegisterRequest,
@@ -47,6 +48,7 @@ async def register(
         token_service=TokenService(session, settings),
         email_service=EmailService(settings),
         audit_service=AuditService(session, settings),
+        redis=get_redis(request),
     )
     await service.register(
         email=data.email,
@@ -60,6 +62,7 @@ async def register(
 @router.post("/verify-email", response_model=MessageResponse)
 async def verify_email(
     data: VerifyEmailRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     settings=Depends(get_settings),
     hooks=Depends(get_hooks),
@@ -71,8 +74,9 @@ async def verify_email(
         token_service=TokenService(session, settings),
         email_service=EmailService(settings),
         audit_service=AuditService(session, settings),
+        redis=get_redis(request),
     )
-    await service.verify_email(data.token)
+    await service.verify_email(data.email, data.otp)
     return MessageResponse(message="Email verified")
 
 
@@ -166,6 +170,7 @@ async def logout(
 @router.post("/password-reset/request", response_model=MessageResponse)
 async def password_reset_request(
     data: PasswordResetRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     settings=Depends(get_settings),
     hooks=Depends(get_hooks),
@@ -178,14 +183,16 @@ async def password_reset_request(
         token_service=TokenService(session, settings),
         email_service=EmailService(settings),
         audit_service=AuditService(session, settings),
+        redis=get_redis(request),
     )
     await service.request_password_reset(data.email)
-    return MessageResponse(message="If the email exists, a reset link was sent")
+    return MessageResponse(message="If the email exists, a reset code was sent")
 
 
 @router.post("/password-reset/confirm", response_model=MessageResponse)
 async def password_reset_confirm(
     data: PasswordResetConfirm,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     settings=Depends(get_settings),
     hooks=Depends(get_hooks),
@@ -197,8 +204,9 @@ async def password_reset_confirm(
         token_service=TokenService(session, settings),
         email_service=EmailService(settings),
         audit_service=AuditService(session, settings),
+        redis=get_redis(request),
     )
-    await service.confirm_password_reset(data.token, data.new_password)
+    await service.confirm_password_reset(data.email, data.otp, data.new_password)
     return MessageResponse(message="Password updated")
 
 
@@ -225,6 +233,7 @@ async def change_password(
 @router.post("/change-email/request", response_model=MessageResponse)
 async def change_email_request(
     data: ChangeEmailRequest,
+    request: Request,
     current_user=Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
     settings=Depends(get_settings),
@@ -237,6 +246,7 @@ async def change_email_request(
         token_service=TokenService(session, settings),
         email_service=EmailService(settings),
         audit_service=AuditService(session, settings),
+        redis=get_redis(request),
     )
     await service.request_email_change(current_user, data.new_email, data.current_password)
     return MessageResponse(message="Email change verification sent")
@@ -245,6 +255,7 @@ async def change_email_request(
 @router.post("/change-email/confirm", response_model=MessageResponse)
 async def change_email_confirm(
     data: ChangeEmailConfirm,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     settings=Depends(get_settings),
     hooks=Depends(get_hooks),
@@ -256,6 +267,7 @@ async def change_email_confirm(
         token_service=TokenService(session, settings),
         email_service=EmailService(settings),
         audit_service=AuditService(session, settings),
+        redis=get_redis(request),
     )
-    await service.confirm_email_change(data.token)
+    await service.confirm_email_change(data.new_email, data.otp)
     return MessageResponse(message="Email updated")
