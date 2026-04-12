@@ -90,6 +90,7 @@
     <button onclick="showPanel('guide')" id="nav-guide" style="color:#38bdf8;font-weight:600;border-bottom:1px solid #334155;margin-bottom:4px;">User Guide</button>
     <h3>Public</h3>
     <button onclick="showPanel('health')" id="nav-health">Health Check</button>
+    <button onclick="showPanel('helpapi')" id="nav-helpapi">API Reference</button>
     <button onclick="showPanel('register')" id="nav-register">Register</button>
     <button onclick="showPanel('login')" id="nav-login">Login</button>
     <button onclick="showPanel('verify-email')" id="nav-verify-email">Verify Email</button>
@@ -299,6 +300,12 @@
           <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/health')">Check Health</button>
           <br/><br/>
           <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/ready')">Check Readiness</button>
+        </div>
+
+        <div id="p-helpapi" class="hidden">
+          <h2>API Reference</h2>
+          <p style="color:#94a3b8;font-size:13px;margin-bottom:16px;">Fetch the machine-readable API reference. Calling apps can use <code style="background:#1e293b;padding:1px 5px;border-radius:3px;color:#38bdf8;">GET /api/v1/help</code> to discover all endpoints, scopes, rate limits, and password policy at runtime.</p>
+          <button class="btn btn-primary" onclick="apiCall('GET', '/api/v1/help')">Fetch API Reference</button>
         </div>
 
         <div id="p-register" class="hidden">
