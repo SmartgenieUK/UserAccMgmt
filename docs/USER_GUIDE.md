@@ -28,7 +28,7 @@ Expected result:
 
 ## 2. Verify Email
 
-Login is blocked until email is verified.
+Login is blocked until email is verified. The platform emails a one-time OTP code (default 6 digits, 10-minute TTL).
 
 Request:
 
@@ -36,9 +36,24 @@ Request:
 curl -X POST "http://localhost:8000/api/v1/verify-email" \
   -H "Content-Type: application/json" \
   -d '{
-    "token": "<verification-token-from-email>"
+    "email": "alice@example.com",
+    "otp": "<6-digit-code-from-email>"
   }'
 ```
+
+### 2.1 Resend Verification OTP
+
+If the original code expired or was lost, request a fresh one (rate-limited to 3/hour per IP and per recipient):
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/resend-verification" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "alice@example.com"
+  }'
+```
+
+The response is the same regardless of whether the account exists, to prevent account enumeration.
 
 ## 3. Login
 
@@ -131,13 +146,14 @@ curl -X POST "http://localhost:8000/api/v1/password-reset/request" \
   }'
 ```
 
-Confirm password reset:
+Confirm password reset (using the OTP code received by email):
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/password-reset/confirm" \
   -H "Content-Type: application/json" \
   -d '{
-    "token": "<reset-token-from-email>",
+    "email": "alice@example.com",
+    "otp": "<6-digit-code-from-email>",
     "new_password": "NewStrongPass1!"
   }'
 ```
@@ -166,13 +182,14 @@ curl -X POST "http://localhost:8000/api/v1/change-email/request" \
   }'
 ```
 
-Confirm email change:
+Confirm email change (using the OTP code sent to the new address):
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/change-email/confirm" \
   -H "Content-Type: application/json" \
   -d '{
-    "token": "<email-change-token-from-email>"
+    "new_email": "alice.new@example.com",
+    "otp": "<6-digit-code-from-email>"
   }'
 ```
 
@@ -221,7 +238,68 @@ curl -X POST "http://localhost:8000/api/v1/invitations/accept" \
   }'
 ```
 
-## 8. Admin Operations
+## 8. Applications (OAuth2 Clients)
+
+Server-to-server integrations use registered applications with `client_id`/`client_secret`. Organization admins manage apps under their org.
+
+Register an application (admin role in org required):
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/orgs/<org-id>/apps" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "X-Org-Id: <org-id>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Billing Service",
+    "redirect_uris": [],
+    "allowed_scopes": ["apps:read", "users:read"]
+  }'
+```
+
+The response includes `client_secret` exactly once — store it immediately.
+
+List, get, update, delete:
+
+```bash
+curl "http://localhost:8000/api/v1/orgs/<org-id>/apps" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+curl "http://localhost:8000/api/v1/orgs/<org-id>/apps/<app-id>" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+curl -X PATCH "http://localhost:8000/api/v1/orgs/<org-id>/apps/<app-id>" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
+
+curl -X DELETE "http://localhost:8000/api/v1/orgs/<org-id>/apps/<app-id>" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Rotate secret (invalidates the previous secret; new one shown once):
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/orgs/<org-id>/apps/<app-id>/rotate-secret" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+### 8.1 Client Credentials Grant
+
+Machine-to-machine callers exchange their `client_id`/`client_secret` for an access token:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/auth/token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "<client-id>",
+    "client_secret": "<client-secret>",
+    "scopes": ["apps:read"]
+  }'
+```
+
+Granted scopes are the intersection of requested scopes and the application's `allowed_scopes`. If no `scopes` are requested, all allowed scopes are granted. Tokens include `client_id`, `org_id`, and granted `scopes` claims.
+
+## 9. Admin Operations
 
 List users:
 
@@ -230,18 +308,18 @@ curl "http://localhost:8000/api/v1/admin/users" \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-Disable user:
+Disable or enable a user:
 
 ```bash
 curl -X PATCH "http://localhost:8000/api/v1/admin/users/<user-id>/disable" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "disable": true
+    "disabled": true
   }'
 ```
 
-## 9. Health and Readiness
+## 10. Health, Readiness, and API Discovery
 
 Health:
 
@@ -249,23 +327,37 @@ Health:
 curl "http://localhost:8000/api/v1/health"
 ```
 
-Readiness:
+Readiness (checks DB + Redis):
 
 ```bash
 curl "http://localhost:8000/api/v1/ready"
 ```
 
-## 10. Common Errors
+Machine-readable API reference — endpoints, scopes, roles, rate limits, password policy, enabled OAuth providers:
+
+```bash
+curl "http://localhost:8000/api/v1/help"
+```
+
+## 11. Interactive Test Console
+
+`examples/test-form.html` is a self-contained page that exercises every endpoint above with form inputs and response previews. Open it directly in a browser while the API is running. It's the fastest way to try flows end-to-end without writing client code.
+
+## 12. Common Errors
 
 - `401 auth_failed` / `Invalid credentials`: bad credentials or invalid token.
 - `401 email_not_verified`: verify email before login.
 - `401 account_locked`: too many failed logins; wait for lockout window.
+- `401 invalid_otp` / `otp_expired`: OTP code was wrong or past its TTL — request a fresh one.
+- `401 invalid_client`: client_id/secret wrong or application disabled.
 - `403 forbidden` / `Insufficient permissions`: role or scope does not allow action.
+- `403 admin_required`: endpoint requires admin role in the target organization.
+- `403 email_domain_blocked`: recipient email domain is not in `ALLOWED_EMAIL_DOMAINS`.
 - `409 email_exists`: email already registered.
 - `422 validation_error`: request format or field value invalid.
-- `429 rate_limited`: request frequency exceeded.
+- `429 rate_limited`: request frequency exceeded (global, per-endpoint, or per-recipient).
 
-## 11. Security Notes for Users
+## 13. Security Notes for Users
 
 - Always use HTTPS in non-local environments.
 - Never share refresh tokens.

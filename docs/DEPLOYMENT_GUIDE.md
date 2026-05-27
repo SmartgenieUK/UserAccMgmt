@@ -35,7 +35,16 @@ Edit `.env` and set at minimum:
 - `SECRET_KEY` (32+ chars)
 - `DATABASE_URL`
 - `REDIS_URL`
-- SMTP values (`SMTP_HOST`, `SMTP_PORT`, etc.)
+- `ALLOWED_ORIGINS` — comma-separated list of allowed CORS origins (no wildcard fallback)
+- Email provider — one of:
+  - `EMAIL_PROVIDER=smtp` plus `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`, `EMAIL_FROM`
+  - `EMAIL_PROVIDER=acs` plus `ACS_CONNECTION_STRING`, `EMAIL_FROM`
+
+Optional hardening:
+
+- `ALLOWED_EMAIL_DOMAINS` — comma-separated recipient-domain allowlist. Empty list allows all.
+- `OTP_LENGTH` (default 6) and `OTP_EXPIRE_MINUTES` (default 10) for verification/reset/email-change codes.
+- `RATE_LIMIT_EMAIL_PER_RECIPIENT_PER_HOUR` (default 3) per-recipient outbound email limit.
 
 For local Compose defaults, the included `.env.example` already points to:
 
@@ -238,12 +247,16 @@ Run these checks after deployment:
 
 1. `GET /api/v1/health` returns `ok`
 2. `GET /api/v1/ready` returns `ready`
-3. Registration flow persists user rows in PostgreSQL
-4. Login blocked before email verification
-5. Login works after email verification
-6. Refresh token rotation works
-7. Redis rate-limits are active
-8. Logs/traces visible in Application Insights
+3. `GET /api/v1/help` returns the API reference (quick sanity check on config)
+4. Registration flow persists user rows in PostgreSQL
+5. Verification OTP is received via configured email provider
+6. Login blocked before email verification
+7. Login works after OTP verification
+8. Refresh token rotation works
+9. Resend verification delivers a fresh OTP
+10. Client credentials grant (`POST /auth/token`) returns a token for a registered application
+11. Redis rate-limits are active (global, per-endpoint, per-recipient)
+12. Logs/traces visible in Application Insights
 
 ## 7. Rollback Strategy
 

@@ -6,12 +6,15 @@ This document describes the runtime architecture, security model, data model, an
 
 The service provides reusable identity capabilities for internal and external applications:
 
-- Email/password authentication
+- Email/password authentication with OTP-based email verification
 - OAuth/OIDC authentication (Google, Microsoft Entra ID)
+- OAuth2 client credentials grant for machine-to-machine callers
+- Per-org registered applications (client_id/secret + scope allowlist)
 - Multi-tenant organization membership
 - Role-based authorization with scopes
-- Token lifecycle management (access + rotating refresh tokens)
+- Token lifecycle management (user access + rotating refresh tokens, client access tokens)
 - Auditable security and account events
+- Email abuse protection (domain allowlist, per-recipient rate limiting)
 
 The API is exposed under `/api/v1/*`.
 
@@ -35,8 +38,8 @@ Core runtime services:
 
 - FastAPI application (`app/main.py`)
 - PostgreSQL (system of record)
-- Redis (rate limiting, OAuth state storage when available)
-- SMTP relay (verification, reset, invitation email delivery)
+- Redis (rate limiting, OAuth state, OTP storage)
+- Email provider — SMTP relay or Azure Communication Services (selected via `EMAIL_PROVIDER`)
 
 Supporting Azure services (IaC in `iac/`):
 
@@ -73,12 +76,15 @@ Supporting Azure services (IaC in `iac/`):
 Registration (`POST /register`) performs:
 
 1. Email normalization and uniqueness check.
-2. Hook-based domain validation and password policy checks.
-3. User row + credential row creation.
-4. Personal/default organization + admin membership creation.
-5. Verification token creation (hashed at rest).
-6. Verification email dispatch.
-7. Audit event write.
+2. Domain allowlist check against `ALLOWED_EMAIL_DOMAINS` (when configured).
+3. Hook-based domain validation and password policy checks.
+4. User row + credential row creation.
+5. Personal/default organization + admin membership creation.
+6. OTP generation + storage in Redis (keyed by purpose + email, TTL `OTP_EXPIRE_MINUTES`).
+7. Verification email dispatch via configured provider.
+8. Audit event write.
+
+Resend verification (`POST /resend-verification`) allows an unverified user to request a fresh OTP without re-registering. Response is constant-time and identity-agnostic to avoid account enumeration. Rate limited per IP (3/hour) and per recipient.
 
 Login (`POST /login`) performs:
 
@@ -95,11 +101,18 @@ Login (`POST /login`) performs:
 
 ### 5.2 Token Model
 
-Access token:
+User access token:
 
 - JWT (`HS256`)
 - default TTL: 15 minutes
 - claims include: `sub`, `email`, `role`, `org_id`, `scopes`, `exp`
+
+Client access token (machine-to-machine):
+
+- JWT (`HS256`)
+- claims include: `sub=client:<client_id>`, `client_id`, `org_id`, `scopes`, `exp`
+- issued from `POST /auth/token` via OAuth2 client credentials grant
+- no refresh token — caller re-authenticates on expiry
 
 Refresh token:
 
@@ -109,17 +122,34 @@ Refresh token:
 - rotation on refresh invalidates prior token
 - revocation tracked by `revoked_at`
 
-### 5.3 Verification and Recovery
+### 5.3 Verification and Recovery (OTP-based)
 
-Verification token types:
+OTP-protected flows:
 
 - email verification
 - password reset
 - email change confirmation
 
-Tokens are modeled in `verification_tokens` with expiry and one-time use semantics (`used_at`).
+OTP storage:
+
+- generated as numeric codes (default 6 digits)
+- persisted in Redis keyed by purpose + normalized email
+- TTL from `OTP_EXPIRE_MINUTES` (default 10)
+- consumed with Redis `GETDEL` to enforce one-time use
+- delivered to the user via the configured email provider
+
+The legacy link-based `verification_tokens` table is retained in the schema but no longer part of the active verification flow.
+
+### 5.4 Email Abuse Protection
+
+- `ALLOWED_EMAIL_DOMAINS` (optional) blocks outbound email to recipients outside the allowlist before dispatch.
+- Per-recipient rate limit (default 3/hour) on register, password reset, and email change, independent of per-IP limits.
+- Global rate limit is 60 req/min per IP.
+- CORS requires an explicit `ALLOWED_ORIGINS` list — there is no wildcard fallback.
 
 ## 6. OAuth/OIDC Architecture
+
+### 6.1 User Login (Authorization Code + PKCE)
 
 Routes:
 
@@ -147,6 +177,20 @@ Flow design:
 Important operational note:
 
 - OAuth requires provider client ids/secrets and redirect URIs in `.env`.
+
+### 6.2 Client Credentials Grant (Machine-to-Machine)
+
+Route: `POST /auth/token`
+
+Flow:
+
+1. Organization admin registers an application via `POST /orgs/{org_id}/apps`, receiving `client_id` and a one-time `client_secret`.
+2. The secret is Argon2-hashed at rest (`client_secret_hash`); the plaintext is never stored.
+3. Service-to-service callers exchange credentials for a client access token.
+4. Granted scopes are the set intersection of `requested_scopes` and `allowed_scopes`; if no scopes are requested, all allowed scopes are granted.
+5. Rate limit: 30 req/min per IP.
+
+Admins may rotate secrets (`POST /orgs/{org_id}/apps/{app_id}/rotate-secret`) — the previous secret is immediately invalidated and a new one is returned once.
 
 ## 7. Authorization and Multi-Tenancy
 
@@ -183,10 +227,11 @@ Primary entities:
 - `credentials`
 - `external_identities`
 - `refresh_tokens`
-- `verification_tokens`
+- `verification_tokens` (legacy link-flow; OTP-based flow uses Redis)
 - `organizations`
 - `memberships`
 - `invitations`
+- `applications` — per-org OAuth2 clients (`client_id`, `client_secret_hash`, `redirect_uris`, `allowed_scopes`, `is_active`)
 - `audit_events`
 
 Design highlights:
@@ -203,10 +248,15 @@ Design highlights:
 Implemented controls:
 
 - Argon2 password hashing (Passlib)
+- Argon2 hashing of application client secrets at rest
 - refresh token hashing at rest
 - email verification gate before login
+- OTP one-time use (Redis `GETDEL`) + short TTL
 - lockout policy after repeated failures
 - route + global rate limiting (Redis-backed)
+- per-email-recipient rate limiting on outbound mail
+- email recipient domain allowlist (`ALLOWED_EMAIL_DOMAINS`)
+- explicit `ALLOWED_ORIGINS` required for CORS (no wildcard fallback)
 - structured audit logging
 - standardized error contracts
 - TLS-required PostgreSQL connection pattern in IaC outputs
@@ -227,6 +277,7 @@ Application observability features:
 - audit event log table for identity-sensitive operations
 - health endpoint: `/api/v1/health`
 - readiness endpoint: `/api/v1/ready` (DB + Redis check)
+- machine-readable API reference: `/api/v1/help` (endpoints, scopes, roles, rate limits, password policy, enabled OAuth providers)
 - metrics middleware counters/histograms for request volume and latency
 
 Azure observability services:
@@ -243,9 +294,10 @@ Configuration source:
 
 Sensitive values:
 
-- app signing secret
-- SMTP credentials
-- OAuth client secrets
+- app signing secret (`SECRET_KEY`)
+- SMTP credentials or ACS connection string (depending on `EMAIL_PROVIDER`)
+- OAuth provider client secrets (Google, Microsoft)
+- Application client secrets (hashed at rest, but returned once at create/rotate)
 - DB and Redis credentials
 
 Azure secret strategy:

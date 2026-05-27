@@ -12,8 +12,8 @@ Application:
 Data + platform dependencies:
 
 - PostgreSQL (`authdb`) for persistent identity data
-- Redis for rate limits, lockout counters, OAuth state
-- SMTP relay for verification/reset/invitation messages
+- Redis for rate limits, lockout counters, OAuth state, OTP codes
+- Email provider — SMTP relay or Azure Communication Services (`EMAIL_PROVIDER`) for verification/reset/invitation messages
 - Azure Key Vault for secret storage
 - Azure Monitor (Log Analytics + Application Insights)
 
@@ -22,11 +22,13 @@ Data + platform dependencies:
 - Liveness: `GET /api/v1/health`
 - Readiness: `GET /api/v1/ready`
 - Docs: `GET /api/v1/docs`
+- API reference: `GET /api/v1/help`
 
 Expected responses:
 
 - health: `{"status":"ok"}`
 - ready: `{"status":"ready"}`
+- help: JSON with endpoints, scopes, roles, rate limits, password policy, enabled OAuth providers
 
 ## 3. Standard Operating Procedures
 
@@ -82,8 +84,10 @@ bash iac/destroy-instance.sh <instance-name>
 5. Execute post-deploy checks:
 - `/api/v1/health`
 - `/api/v1/ready`
+- `/api/v1/help` (verifies config surfaces correctly)
 - `POST /api/v1/login` with known verified test account
 - `POST /api/v1/refresh`
+- `POST /api/v1/auth/token` with a known test application (client credentials grant)
 6. Monitor error rate, p95 latency, and 401/429 spikes for 15 minutes.
 
 Rollback:
