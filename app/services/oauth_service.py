@@ -165,8 +165,7 @@ class OAuthService:
 
     async def _ensure_personal_org(self, user: User) -> None:
         result = await self.session.execute(select(Membership).where(Membership.user_id == user.id))
-        membership = result.scalar_one_or_none()
-        if membership:
+        if result.scalars().first():
             return
         name = f"{user.display_name or user.email}'s Org"
         org = Organization(name=name, slug=slugify(name))
@@ -175,8 +174,11 @@ class OAuthService:
         self.session.add(Membership(user_id=user.id, org_id=org.id, role=Role.ADMIN))
 
     async def _get_primary_membership(self, user: User) -> Membership:
-        result = await self.session.execute(select(Membership).where(Membership.user_id == user.id))
-        membership = result.scalar_one_or_none()
+        # Earliest membership is the default org (plan D2, 2026-09-14).
+        result = await self.session.execute(
+            select(Membership).where(Membership.user_id == user.id).order_by(Membership.created_at, Membership.id)
+        )
+        membership = result.scalars().first()
         if not membership:
             raise ConflictError("User has no organization", code="org_missing")
         return membership

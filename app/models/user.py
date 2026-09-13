@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, Boolean, DateTime, Integer, func
+from sqlalchemy import String, Boolean, Integer, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.types import UUID_TYPE, JSONB_TYPE
+from app.db.types import UUID_TYPE, JSONB_TYPE, TZ_DATETIME
 
 
 class User(Base):
@@ -22,9 +22,9 @@ class User(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     custom_fields: Mapped[dict] = mapped_column(JSONB_TYPE, default=dict, nullable=False)
     custom_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    created_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), nullable=False)
     updated_at: Mapped = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        TZ_DATETIME, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
     credential = relationship(

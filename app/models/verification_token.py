@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, DateTime, ForeignKey, Enum, func, Index
+from sqlalchemy import String, ForeignKey, Enum, func, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.db.types import UUID_TYPE
+from app.db.types import UUID_TYPE, TZ_DATETIME
 from app.models.enums import VerificationTokenType
 
 
@@ -24,8 +24,8 @@ class VerificationToken(Base):
     )
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
-    created_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    expires_at: Mapped = mapped_column(DateTime(timezone=True), nullable=False)
-    used_at: Mapped = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), nullable=False)
+    expires_at: Mapped = mapped_column(TZ_DATETIME, nullable=False)
+    used_at: Mapped = mapped_column(TZ_DATETIME, nullable=True)
 
     __table_args__ = (Index("ix_verification_tokens_type", "token_type"),)

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, DateTime, ForeignKey, Enum, func, Index
+from sqlalchemy import String, ForeignKey, Enum, func, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.types import UUID_TYPE
+from app.db.types import UUID_TYPE, TZ_DATETIME
 from app.models.enums import Role
 
 
@@ -21,9 +21,9 @@ class Invitation(Base):
         nullable=False,
     )
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    expires_at: Mapped = mapped_column(DateTime(timezone=True), nullable=False)
-    accepted_at: Mapped = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at: Mapped = mapped_column(TZ_DATETIME, nullable=False)
+    accepted_at: Mapped = mapped_column(TZ_DATETIME, nullable=True)
+    created_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), nullable=False)
 
     organization = relationship("Organization", back_populates="invitations")
 

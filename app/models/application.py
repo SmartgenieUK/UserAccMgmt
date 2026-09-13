@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, func, Index, UniqueConstraint
+from sqlalchemy import String, Boolean, ForeignKey, func, Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.types import UUID_TYPE, JSONB_TYPE
+from app.db.types import UUID_TYPE, JSONB_TYPE, TZ_DATETIME
 
 
 class Application(Base):
@@ -19,9 +19,9 @@ class Application(Base):
     redirect_uris: Mapped = mapped_column(JSONB_TYPE, nullable=False, server_default="[]")
     allowed_scopes: Mapped = mapped_column(JSONB_TYPE, nullable=False, server_default="[]")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    created_at: Mapped = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), nullable=False)
     updated_at: Mapped = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+        TZ_DATETIME, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
     organization = relationship("Organization", back_populates="applications")

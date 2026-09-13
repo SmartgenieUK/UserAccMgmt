@@ -9,14 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import AuthError, ConflictError, ValidationError
 from app.core.hooks import HookManager
-from app.models import User, Credential, VerificationToken, Membership, Organization, Role
-from app.models.enums import VerificationTokenType
-from app.security.hashing import hash_password, verify_password, hash_token, verify_token
+from app.models import User, Credential, Membership, Organization, Role
+from app.security.hashing import hash_password, verify_password
 from app.security.permissions import resolve_scopes
 from app.services.token_service import TokenService
 from app.services.email_service import EmailService
 from app.services.audit_service import AuditService
-from app.utils.security import normalize_email, generate_token_secret, split_token
+from app.utils.security import normalize_email
 from app.utils.time import utcnow
 from app.utils.validation import slugify
 
@@ -228,41 +227,6 @@ class AuthService:
         await self.audit_service.log_event(action="email_changed", user_id=str(user.id))
         await self.session.commit()
 
-    async def _create_verification_token(
-        self, user: User, token_type: VerificationTokenType, email: str | None = None
-    ) -> str:
-        secret = generate_token_secret(32)
-        token_hash = hash_token(secret)
-        expires_at = utcnow() + timedelta(
-            hours={
-                VerificationTokenType.EMAIL_VERIFY: self.settings.EMAIL_VERIFY_EXPIRE_HOURS,
-                VerificationTokenType.PASSWORD_RESET: self.settings.PASSWORD_RESET_EXPIRE_HOURS,
-                VerificationTokenType.EMAIL_CHANGE: self.settings.EMAIL_CHANGE_EXPIRE_HOURS,
-            }[token_type]
-        )
-        record = VerificationToken(
-            user_id=user.id,
-            token_type=token_type,
-            token_hash=token_hash,
-            email=email,
-            expires_at=expires_at,
-        )
-        self.session.add(record)
-        await self.session.flush()
-        return f"{record.id}.{secret}"
-
-    async def _consume_token(self, token: str, token_type: VerificationTokenType) -> VerificationToken:
-        token_id_str, secret = split_token(token)
-        record = await self.session.get(VerificationToken, token_id_str)
-        if not record or record.token_type != token_type:
-            raise ValidationError("Invalid token", code="token_invalid")
-        if record.used_at or record.expires_at <= utcnow():
-            raise ValidationError("Token expired", code="token_expired")
-        if not verify_token(secret, record.token_hash):
-            raise ValidationError("Invalid token", code="token_invalid")
-        record.used_at = utcnow()
-        return record
-
     async def _resolve_membership(self, user_id: str, org_id: str | None) -> Membership:
         if org_id:
             result = await self.session.execute(
@@ -272,8 +236,11 @@ class AuthService:
             if not membership:
                 raise AuthError("No membership for organization", code="org_membership_missing")
             return membership
-        result = await self.session.execute(select(Membership).where(Membership.user_id == user_id))
-        membership = result.scalar_one_or_none()
+        # Default org for a multi-org user: the earliest membership (plan D2, 2026-09-14).
+        result = await self.session.execute(
+            select(Membership).where(Membership.user_id == user_id).order_by(Membership.created_at, Membership.id)
+        )
+        membership = result.scalars().first()
         if not membership:
             raise AuthError("No organization membership", code="org_membership_missing")
         return membership
