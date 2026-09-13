@@ -116,6 +116,13 @@ hop 2 is a config change. See decision D1.
 
 Exit: UAM can issue RS256 behind a flag while still issuing HS256 by default (the flip is W1-cutover below).
 
+**W1 status (2026-09-14): DONE (commit bff1de7).** Deviations from the table: `JWT_ALGORITHM` keeps
+`HS256` as the default (the flip is the cutover's last step, by config); hop 1 uses a **single**
+`JWT_AUDIENCE` rather than a per-product map, because login has no product context today — per-consumer
+`aud` arrives naturally in hop 2, where each product is its own Entra app registration. `iac/main.tf`
+defines no secrets at all (they are set by hand per the deployment guide), so W1.7 is the runbook entry
+naming the Key Vault secret `jwt-private-key-pem`, not a Terraform change.
+
 ### W2 — Entitlement model + API (gate: none · size M · depends W0; parallel with W1)
 
 Audit group (a). Two tables; entitlement is derived, never stored per user.
@@ -133,6 +140,12 @@ Audit group (a). Two tables; entitlement is derived, never stored per user.
 | W2.9 | Tests: default Lite; manual override; seat cap; past_due ⇒ Lite; scope enforcement | `tests/test_entitlements.py` |
 
 Exit: devgenie-core's CR-133 slice can gate against a real resolver using W1 test tokens — no Entra needed.
+
+**W2 status (2026-09-14): DONE.** As tabled, plus seat assign/unassign routes (`POST`/`DELETE
+/orgs/{id}/entitlements/{product}/seats…`) so the seat cap is exercisable; `status`/`source` surfaced on the
+entitlement; statuses/sources are plain strings validated in code (no new PostgreSQL enum types). Plans are
+seeded from `DEFAULT_PLANS` in `app/models/plan.py` by both the migration and the tests; the seed carries
+empty `features`/`limits` — the per-tier scope and seat defaults are a product decision still to be entered.
 
 ### W1-cutover — CloudGenie verifies RS256, then UAM flips (gate: confirmation · CloudGenie S code, M ops)
 
