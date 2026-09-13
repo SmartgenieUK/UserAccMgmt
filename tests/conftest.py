@@ -34,6 +34,8 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_session
 from app.main import app
+from app.models.plan import Plan, DEFAULT_PLANS
+from app.services.email_service import EmailService
 
 get_settings.cache_clear()
 
@@ -77,6 +79,8 @@ async def engine():
 async def db_session(engine):
     async_session = async_sessionmaker(engine, expire_on_commit=False)
     async with async_session() as session:
+        session.add_all(Plan(**plan) for plan in DEFAULT_PLANS)  # same seed as the migration
+        await session.commit()
         yield session
 
 
@@ -96,6 +100,18 @@ async def client(db_session, fake_redis):
         yield c
     app.dependency_overrides.clear()
     app.state.redis = None
+
+
+@pytest.fixture()
+def sent_otps(monkeypatch):
+    """Capture the OTP the app would have emailed, instead of sending it."""
+    captured: list[str] = []
+
+    async def _capture(self, to_email, otp):
+        captured.append(otp)
+
+    monkeypatch.setattr(EmailService, "send_verification_email", _capture)
+    return captured
 
 
 @pytest.fixture(autouse=True)

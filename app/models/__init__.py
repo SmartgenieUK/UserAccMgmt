@@ -9,6 +9,8 @@ from .membership import Membership
 from .invitation import Invitation
 from .application import Application
 from .audit_event import AuditEvent
+from .plan import Plan
+from .subscription import Subscription
 
 __all__ = [
     "Role",
@@ -24,4 +26,6 @@ __all__ = [
     "Invitation",
     "Application",
     "AuditEvent",
+    "Plan",
+    "Subscription",
 ]

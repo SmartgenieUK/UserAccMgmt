@@ -15,9 +15,11 @@ ROLE_SCOPES: dict[Role, list[str]] = {
         "apps:write",
         "admin:users:read",
         "admin:users:write",
+        "entitlements:read",
+        "billing:write",
     ],
-    Role.MEMBER: ["profile:read", "profile:write", "orgs:read", "users:read", "apps:read"],
-    Role.READONLY: ["profile:read", "orgs:read", "users:read", "apps:read"],
+    Role.MEMBER: ["profile:read", "profile:write", "orgs:read", "users:read", "apps:read", "entitlements:read"],
+    Role.READONLY: ["profile:read", "orgs:read", "users:read", "apps:read", "entitlements:read"],
 }
 
 

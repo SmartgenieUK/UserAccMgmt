@@ -3,27 +3,13 @@ from __future__ import annotations
 from datetime import timedelta
 
 import jwt
-import pytest
 from sqlalchemy import select
 
 from app.models import User, Credential, Membership, Organization, Role
-from app.services.email_service import EmailService
 from app.utils.time import utcnow
 
 EMAIL = "test@example.com"
 PASSWORD = "StrongPass1!"
-
-
-@pytest.fixture()
-def sent_otps(monkeypatch):
-    """Capture the OTP the app would have emailed, instead of sending it."""
-    captured: list[str] = []
-
-    async def _capture(self, to_email, otp):
-        captured.append(otp)
-
-    monkeypatch.setattr(EmailService, "send_verification_email", _capture)
-    return captured
 
 
 def _claims(token: str) -> dict:

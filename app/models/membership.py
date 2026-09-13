@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import ForeignKey, Enum, func, UniqueConstraint, Index
+from sqlalchemy import ForeignKey, Enum, func, text, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.db.types import UUID_TYPE, TZ_DATETIME
+from app.db.types import UUID_TYPE, JSONB_TYPE, TZ_DATETIME
 from app.models.enums import Role
 
 
@@ -19,6 +19,8 @@ class Membership(Base):
         Enum(Role, values_callable=lambda e: [i.value for i in e], name="role"),
         nullable=False,
     )
+    # Seats: the products this member holds a seat for (e.g. ["devgenie"]).
+    products: Mapped[list] = mapped_column(JSONB_TYPE, default=list, nullable=False, server_default=text("'[]'"))
     created_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), nullable=False)
     updated_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), onupdate=func.now())
 

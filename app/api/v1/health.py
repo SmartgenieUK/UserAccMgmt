@@ -263,11 +263,13 @@ async def api_help(settings=Depends(get_settings)):
             "apps:write": "Manage applications",
             "admin:users:read": "List all users (admin)",
             "admin:users:write": "Enable/disable users (admin)",
+            "entitlements:read": "Read the org's entitlement for a product",
+            "billing:write": "Set manual entitlements and assign seats (admin)",
         },
         "roles": {
-            "admin": ["profile:read", "profile:write", "orgs:read", "orgs:write", "invitations:write", "users:read", "users:write", "apps:read", "apps:write", "admin:users:read", "admin:users:write"],
-            "member": ["profile:read", "profile:write", "orgs:read", "users:read", "apps:read"],
-            "readonly": ["profile:read", "orgs:read", "users:read", "apps:read"],
+            "admin": ["profile:read", "profile:write", "orgs:read", "orgs:write", "invitations:write", "users:read", "users:write", "apps:read", "apps:write", "admin:users:read", "admin:users:write", "entitlements:read", "billing:write"],
+            "member": ["profile:read", "profile:write", "orgs:read", "users:read", "apps:read", "entitlements:read"],
+            "readonly": ["profile:read", "orgs:read", "users:read", "apps:read", "entitlements:read"],
         },
         "password_policy": {
             "min_length": settings.PASSWORD_MIN_LENGTH,
