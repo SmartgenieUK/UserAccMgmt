@@ -221,8 +221,18 @@ Process:
 
 Important:
 
-- Rotating `SECRET_KEY` invalidates existing JWT sessions.
+- Under `HS256`, rotating `SECRET_KEY` invalidates existing JWT sessions.
+- Under `RS256`, `SECRET_KEY` only backs CSRF (cookie mode); the signing key is `JWT_PRIVATE_KEY_PEM`.
 - Schedule user-impacting rotations in maintenance windows.
+
+Signing-key rotation (`RS256`):
+
+1. Generate a new RSA-2048 private key; store it in Key Vault as `jwt-private-key-pem`.
+2. Move the current public key to `JWT_PREVIOUS_PUBLIC_KEY_PEM` and its kid to `JWT_PREVIOUS_KID`.
+3. Set `JWT_PRIVATE_KEY_PEM` to the new key and bump `JWT_KID` (e.g. `uam-2`).
+4. Restart the revision. `/.well-known/jwks.json` now lists both kids; tokens minted before the restart
+   verify until they expire (15 minutes).
+5. After the access-token TTL has elapsed, clear the `JWT_PREVIOUS_*` values and restart once more.
 
 ## 9. Security Operations
 

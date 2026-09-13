@@ -15,6 +15,7 @@ Production-grade, reusable account and identity service built with FastAPI, Post
 - OAuth/OIDC login for Google and Microsoft Entra ID
 - OAuth2 client credentials grant for machine-to-machine auth
 - Per-org application registration (client_id/secret + scope allowlist)
+- RS256-signed access tokens with `iss`/`aud`/`kid`, JWKS + OpenID discovery endpoints, two-key rotation (HS256 kept only as the pre-cutover legacy)
 - Refresh token rotation with hashed tokens
 - Multi-tenant organizations, invitations, memberships
 - RBAC with scopes

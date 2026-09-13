@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,15 @@ class Settings(BaseSettings):
     PUBLIC_BASE_URL: str = "http://localhost:8000"
 
     SECRET_KEY: str = Field(..., min_length=32)
+    # HS256 = legacy shared-secret tokens (default until the CloudGenie cutover); RS256 = signed with
+    # JWT_PRIVATE_KEY_PEM, carrying iss/aud/kid, verifiable via /.well-known/jwks.json.
     JWT_ALGORITHM: str = "HS256"
+    JWT_PRIVATE_KEY_PEM: str | None = None
+    JWT_KID: str = "uam-1"
+    JWT_PREVIOUS_PUBLIC_KEY_PEM: str | None = None
+    JWT_PREVIOUS_KID: str | None = None
+    JWT_ISSUER: str | None = None  # defaults to PUBLIC_BASE_URL
+    JWT_AUDIENCE: str = "uam"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     EMAIL_VERIFY_EXPIRE_HOURS: int = 24
@@ -103,6 +111,15 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+
+    @model_validator(mode="after")
+    def _check_jwt(self):
+        if self.JWT_ALGORITHM not in ("HS256", "RS256"):
+            raise ValueError("JWT_ALGORITHM must be HS256 or RS256")
+        if self.JWT_ALGORITHM == "RS256" and not self.JWT_PRIVATE_KEY_PEM:
+            raise ValueError("JWT_PRIVATE_KEY_PEM is required when JWT_ALGORITHM=RS256")
+        return self
 
 
 @lru_cache

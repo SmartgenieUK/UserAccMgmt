@@ -101,16 +101,27 @@ Login (`POST /login`) performs:
 
 ### 5.2 Token Model
 
+Signing (`JWT_ALGORITHM`):
+
+- `HS256` — legacy shared-secret tokens (`SECRET_KEY`), no `iss`/`aud`. Still the default until every
+  consumer verifies RS256 (the CloudGenie cutover); then it is withdrawn.
+- `RS256` — signed with `JWT_PRIVATE_KEY_PEM` (Key Vault secret), header `kid` = `JWT_KID`, claims
+  `iss` = `JWT_ISSUER` (default `PUBLIC_BASE_URL`) and `aud` = `JWT_AUDIENCE`. Public keys are published
+  at `/.well-known/jwks.json` (with `/.well-known/openid-configuration` for discovery). A previous key can
+  be kept verifiable during rotation via `JWT_PREVIOUS_PUBLIC_KEY_PEM` + `JWT_PREVIOUS_KID`. Verification
+  accepts RS256 only — HS256 is never listed alongside it. This is the bridge decided in
+  CloudGenie's `uam-signing-model.md` (2026-06-14); Entra External ID issuance later replaces it.
+
 User access token:
 
-- JWT (`HS256`)
+- JWT (`HS256` legacy or `RS256`)
 - default TTL: 15 minutes
-- claims include: `sub`, `email`, `role`, `org_id`, `scopes`, `exp`
+- claims include: `sub`, `email`, `role`, `org_id`, `scopes`, `exp` (+ `iss`, `aud` under RS256)
 
 Client access token (machine-to-machine):
 
-- JWT (`HS256`)
-- claims include: `sub=client:<client_id>`, `client_id`, `org_id`, `scopes`, `exp`
+- JWT (same signing as above)
+- claims include: `sub=<client_id>`, `client_id`, `org_id`, `scopes`, `exp` (+ `iss`, `aud` under RS256)
 - issued from `POST /auth/token` via OAuth2 client credentials grant
 - no refresh token — caller re-authenticates on expiry
 

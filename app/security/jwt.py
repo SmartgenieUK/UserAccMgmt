@@ -4,7 +4,21 @@ from datetime import timedelta
 import jwt
 
 from app.core.config import Settings
+from app.security.keys import get_keyring
 from app.utils.time import utcnow
+
+
+def issuer(settings: Settings) -> str:
+    return settings.JWT_ISSUER or settings.PUBLIC_BASE_URL
+
+
+def _encode(settings: Settings, payload: dict) -> str:
+    if settings.JWT_ALGORITHM == "RS256":
+        ring = get_keyring(settings)
+        payload = {**payload, "iss": issuer(settings), "aud": settings.JWT_AUDIENCE}
+        return jwt.encode(payload, ring.private_key, algorithm="RS256", headers={"kid": ring.kid})
+    # Legacy HS256 (pre-cutover): no iss/aud, so consumers that do not yet pass audience= keep working.
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 
 
 def create_access_token(
@@ -26,8 +40,7 @@ def create_access_token(
         "iat": int(now.timestamp()),
         "exp": int(expires.timestamp()),
     }
-    token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
-    return token, int(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    return _encode(settings, payload), int(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
 def create_client_access_token(
@@ -47,9 +60,19 @@ def create_client_access_token(
         "iat": int(now.timestamp()),
         "exp": int(expires.timestamp()),
     }
-    token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
-    return token, int(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    return _encode(settings, payload), int(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
 def decode_access_token(settings: Settings, token: str) -> dict:
-    return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    if settings.JWT_ALGORITHM == "RS256":
+        ring = get_keyring(settings)
+        kid = jwt.get_unverified_header(token).get("kid")
+        # RS256 only — never list HS256 alongside it (algorithm confusion).
+        return jwt.decode(
+            token,
+            ring.public_key(kid),
+            algorithms=["RS256"],
+            audience=settings.JWT_AUDIENCE,
+            issuer=issuer(settings),
+        )
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])

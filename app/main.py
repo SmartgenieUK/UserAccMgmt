@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.api import api_router
 from app.api.web import router as web_router
+from app.api.wellknown import router as wellknown_router
 from app.core.config import get_settings
 from app.core.exceptions import app_error_handler, AppError
 from app.core.logging import setup_logging
@@ -55,4 +56,5 @@ app.add_middleware(
 )
 
 app.include_router(web_router)
+app.include_router(wellknown_router)
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
