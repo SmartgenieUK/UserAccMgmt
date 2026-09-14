@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     ENTRA_SIGNING_PUBLIC_KEY_PEM: str | None = None  # pin the key (no outbound fetch) / test seam
     ENTRA_PRODUCT_APP_IDS: dict[str, str] = {}  # calling client appId -> product
 
+    STRIPE_API_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_PRICE_MAP: dict[str, str] = {}
+    STRIPE_CHECKOUT_SUCCESS_URL: str = ""
+    STRIPE_CHECKOUT_CANCEL_URL: str = ""
+    STRIPE_PORTAL_RETURN_URL: str = ""
+
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 10
     RATE_LIMIT_REGISTER_PER_HOUR: int = 5
     RATE_LIMIT_RESET_PER_HOUR: int = 5
@@ -149,6 +156,30 @@ class Settings(BaseSettings):
             return result
         return value
 
+    @field_validator("STRIPE_PRICE_MAP", mode="before")
+    @classmethod
+    def _parse_price_map(cls, value):
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return {}
+            if value.startswith("{"):
+                import json
+
+                return json.loads(value)
+            result = {}
+            for pair in value.split(","):
+                pair = pair.strip()
+                if not pair:
+                    continue
+                if "=" not in pair:
+                    raise ValueError(f"STRIPE_PRICE_MAP entry '{pair}' is not priceId=product:tier")
+                price_id, product_tier = pair.split("=", 1)
+                result[price_id.strip()] = product_tier.strip()
+            return result
+        return value
 
     @model_validator(mode="after")
     def _check_jwt(self):

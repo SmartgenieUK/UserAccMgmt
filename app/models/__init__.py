@@ -11,6 +11,7 @@ from .application import Application
 from .audit_event import AuditEvent
 from .plan import Plan
 from .subscription import Subscription
+from .stripe_event import StripeEvent
 
 __all__ = [
     "Role",
@@ -28,4 +29,5 @@ __all__ = [
     "AuditEvent",
     "Plan",
     "Subscription",
+    "StripeEvent",
 ]

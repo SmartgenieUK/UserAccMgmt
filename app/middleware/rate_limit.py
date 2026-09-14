@@ -11,7 +11,8 @@ from app.services.rate_limit_service import RateLimiter
 
 # The Entra token-issuance callout is a Tier-0 sign-in dependency called from Entra's own IPs, not end
 # users; the per-IP global limiter must never throttle it or it would break sign-in tenant-wide (W3.3).
-_RATE_LIMIT_EXEMPT = ("/api/v1/entra/token-issuance",)
+# Stripe webhooks come from Stripe IPs and also must not be rate limited per-IP.
+_RATE_LIMIT_EXEMPT = ("/api/v1/entra/token-issuance", "/webhooks/stripe")
 
 
 class GlobalRateLimitMiddleware(BaseHTTPMiddleware):

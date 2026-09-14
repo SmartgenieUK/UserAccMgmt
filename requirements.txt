@@ -18,3 +18,4 @@ httpx==0.27.2
 python-json-logger==2.0.7
 prometheus-client==0.20.0
 orjson==3.10.6
+stripe==12.5.1
