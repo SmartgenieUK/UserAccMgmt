@@ -165,6 +165,19 @@ Exit: no HS256 token is accepted anywhere; the shared secret is gone from custom
 
 Audit group (b). The long pole; start the tenant work (brief WP1) as soon as W0 is done.
 
+**STATUS 2026-09-14 — W3 core DONE (commit `a2a3584`), tenant-independent slice.** W3.1–W3.4 and the
+JIT half of W3.5 built test-first; `tests/test_entra_claims.py` 8 tests green, full suite 34 passed.
+**Deviation from the original plan:** the endpoint is issuer-agnostic — `ENTRA_ISSUER` selects a
+*workforce* tenant (`login.microsoftonline.com/{tenant}/v2.0`) as readily as an External ID tenant
+(`ciamlogin.com`). Microsoft supports token-issuance-start custom claims providers on *both* tenant
+types (Learn, `custom-extension-tokenissuancestart-configuration`, 2026-09-14), so W3 is **no longer
+blocked on standing up a separate External ID tenant** — it can run against the existing
+`smartgenie.co.uk` workforce tenant (`e11f2537-…`, Entra ID P1). Remaining before live exercise:
+confirm the `99045fe1-…`-authorised extension app registration exists in that tenant, tenant-side
+claims-mapping-policy config (WP1), and W3.8 monitoring. **Deferred:** W3.5's oauth_service migration +
+random-password `Credential` drop, and W3.6 portal provider — both touch live login, so they get their
+own change + review. **Rule 7 review OWED** (codex BLOCKED 4%, agy unrecorded at build time).
+
 | # | Change | File |
 |---|---|---|
 | W3.1 | Config: `ENTRA_TENANT_ID`, `ENTRA_TENANT_DOMAIN`, `ENTRA_ISSUER`, `ENTRA_JWKS_URL`, `ENTRA_CLIENT_ID/SECRET` (UAM's portal RP), `ENTRA_EXTENSION_APP_ID` (aud for inbound calls), `ENTRA_PRODUCT_APP_IDS` (client `appId` → product) | `app/core/config.py:53-60` |
