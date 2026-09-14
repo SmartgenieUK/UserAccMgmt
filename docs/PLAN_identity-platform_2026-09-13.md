@@ -200,6 +200,14 @@ CR-133 verifies it against Entra's JWKS with only config changes.
 
 ### W4 — Stripe billing (gate: precondition — Stripe products exist · size M · depends W2; parallel with W3)
 
+**STATUS 2026-09-14 — W4 DONE (commit `11378c6`), code + tests; live wiring parked.** Built by agy
+(gemini-3.1-pro-high) against a pinned brief, verified by Claude (Rule 7). 9 billing tests, full suite 44
+passed. Checkout/portal/GET-billing routes, root `POST /webhooks/stripe` (signature-verified, idempotent via
+`stripe_events`), `BillingService` as sole `source=stripe` writer with tier ALWAYS from the server-held
+`STRIPE_PRICE_MAP` (never a client field), `organizations.stripe_customer_id`, migration `20260914_000005`.
+Deferred: live Stripe products + keys/config (deploy edge) and a DB-level guard for the concurrent-duplicate
+-webhook race (currently get-then-insert -> Stripe-retry-safe).
+
 Audit group (d), unchanged: `POST /orgs/{id}/billing/checkout-session`, `POST …/portal-session` (Stripe
 Customer Portal instead of our own screens), `GET …/billing`; root-mounted `POST /webhooks/stripe` with
 signature check + idempotent event ids; `BillingService` is the only writer of `source=stripe` rows;
