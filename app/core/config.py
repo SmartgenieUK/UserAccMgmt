@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     OAUTH_PROVIDERS_ENABLED: list[str] = ["google", "microsoft"]
     OAUTH_STATE_TTL_SECONDS: int = 600
 
+    # Entra custom-claims-provider (W3). ENTRA_ISSUER selects the tenant type as config, not code:
+    # workforce = https://login.microsoftonline.com/{tenant}/v2.0, external = https://<dom>.ciamlogin.com/{tenant}/v2.0.
+    ENTRA_TENANT_ID: str | None = None
+    ENTRA_ISSUER: str | None = None
+    ENTRA_EXTENSION_APP_ID: str | None = None  # aud the inbound callout token must carry
+    ENTRA_JWKS_URL: str | None = None  # production: Entra's signing keys, fetched + cached by PyJWKClient
+    ENTRA_SIGNING_PUBLIC_KEY_PEM: str | None = None  # pin the key (no outbound fetch) / test seam
+    ENTRA_PRODUCT_APP_IDS: dict[str, str] = {}  # calling client appId -> product
+
     RATE_LIMIT_LOGIN_PER_MINUTE: int = 10
     RATE_LIMIT_REGISTER_PER_HOUR: int = 5
     RATE_LIMIT_RESET_PER_HOUR: int = 5
@@ -110,6 +119,23 @@ class Settings(BaseSettings):
             return value
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("ENTRA_PRODUCT_APP_IDS", mode="before")
+    @classmethod
+    def _parse_appid_map(cls, value):
+        # Accept a JSON object, an "appId=product,appId2=product2" string, or a dict.
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return {}
+            if value.startswith("{"):
+                import json
+
+                return json.loads(value)
+            return dict(pair.split("=", 1) for pair in value.split(",") if pair.strip())
         return value
 
 

@@ -10,10 +10,12 @@ from app.api.v1.oauth import router as oauth_router
 from app.api.v1.health import router as health_router
 from app.api.v1.applications import router as applications_router
 from app.api.v1.entitlements import router as entitlements_router
+from app.api.v1.entra import router as entra_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, tags=["auth"])
 api_router.include_router(oauth_router, tags=["oauth"])
+api_router.include_router(entra_router, tags=["entra"])
 api_router.include_router(users_router, tags=["users"])
 api_router.include_router(orgs_router, tags=["orgs"])
 api_router.include_router(applications_router, tags=["applications"])

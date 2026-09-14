@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, ForeignKey, Enum, func
+from sqlalchemy import String, ForeignKey, Enum, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -25,5 +25,8 @@ class ExternalIdentity(Base):
     provider_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     created_at: Mapped = mapped_column(TZ_DATETIME, server_default=func.now(), nullable=False)
+
+    # One external subject links to at most one user (JIT idempotency, W3).
+    __table_args__ = (UniqueConstraint("provider", "provider_user_id", name="uq_external_provider_sub"),)
 
     user = relationship("User", back_populates="external_identities")

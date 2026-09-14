@@ -17,3 +17,4 @@ class VerificationTokenType(str, Enum):
 class ExternalProvider(str, Enum):
     GOOGLE = "google"
     MICROSOFT = "microsoft"
+    ENTRA_EXTERNAL = "entra_external"
