@@ -11,7 +11,7 @@ from sqlalchemy import select
 from fastapi import Request
 
 from app.core.config import get_settings
-from app.models import Membership, Plan, Role, Subscription
+from app.models import AuditEvent, Membership, Plan, Role, Subscription
 from app.services.stripe_gateway import StripeGateway, get_stripe_gateway
 from app.main import app
 
@@ -72,7 +72,7 @@ def billing_settings():
     def get_test_settings():
         s = get_settings()
         s.STRIPE_WEBHOOK_SECRET = "whsec_test"
-        s.STRIPE_PRICE_MAP = {"price_pro": "devgenie:pro"}
+        s.STRIPE_PRICE_MAP = {"price_pro": "devgenie:pro", "price_ent": "devgenie:enterprise"}
         s.STRIPE_CHECKOUT_SUCCESS_URL = "http://test/success"
         s.STRIPE_CHECKOUT_CANCEL_URL = "http://test/cancel"
         s.STRIPE_PORTAL_RETURN_URL = "http://test/portal"
@@ -280,3 +280,210 @@ async def test_client_cannot_declare_tier(client, db_session, admin, billing_set
     assert res.status_code == 200
     data = res.json()
     assert data["tier"] == "pro"  # Not enterprise
+
+
+@pytest.mark.asyncio
+async def test_webhook_subscription_updated_past_due_falls_back_to_lite(client, db_session, admin, billing_settings):
+    # Activate pro subscription
+    checkout_event = {
+        "id": "evt_upd1_chk",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_upd1",
+                "customer": "cus_test123",
+                "subscription": "sub_upd1",
+                "metadata": {
+                    "org_id": admin["org_id"],
+                    "price_id": "price_pro",
+                },
+            },
+        },
+    }
+    payload, sig = sign(checkout_event)
+    res = await client.post("/webhooks/stripe", content=payload, headers={"Stripe-Signature": sig, "content-type": "application/json"})
+    assert res.status_code == 200
+
+    # Post customer.subscription.updated with status: past_due
+    update_event = {
+        "id": "evt_upd1_upd",
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": "sub_upd1",
+                "status": "past_due",
+                "current_period_end": int(time.time()) + 86400,
+                "items": {"data": [{"price": {"id": "price_pro"}}]},
+            },
+        },
+    }
+    payload2, sig2 = sign(update_event)
+    res2 = await client.post("/webhooks/stripe", content=payload2, headers={"Stripe-Signature": sig2, "content-type": "application/json"})
+    assert res2.status_code == 200
+
+    sub = (await db_session.execute(
+        select(Subscription).where(Subscription.stripe_subscription_id == "sub_upd1")
+    )).scalar_one()
+    assert sub.status == "past_due"
+
+    res = await client.get("/api/v1/entitlements/me?product=devgenie", headers=admin["headers"])
+    assert res.status_code == 200
+    data = res.json()
+    assert data["tier"] == "lite"
+    assert data["status"] == "past_due"
+
+
+@pytest.mark.asyncio
+async def test_webhook_subscription_updated_price_change_changes_tier(client, db_session, admin, billing_settings):
+    # Activate pro subscription
+    checkout_event = {
+        "id": "evt_upd2_chk",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_upd2",
+                "customer": "cus_test123",
+                "subscription": "sub_upd2",
+                "metadata": {
+                    "org_id": admin["org_id"],
+                    "price_id": "price_pro",
+                },
+            },
+        },
+    }
+    payload, sig = sign(checkout_event)
+    res = await client.post("/webhooks/stripe", content=payload, headers={"Stripe-Signature": sig, "content-type": "application/json"})
+    assert res.status_code == 200
+
+    # Post update with price_ent, status active, future current_period_end
+    future_ts = int(time.time()) + 86400
+    update_event = {
+        "id": "evt_upd2_upd",
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": "sub_upd2",
+                "status": "active",
+                "current_period_end": future_ts,
+                "items": {"data": [{"price": {"id": "price_ent"}}]},
+            },
+        },
+    }
+    payload2, sig2 = sign(update_event)
+    res2 = await client.post("/webhooks/stripe", content=payload2, headers={"Stripe-Signature": sig2, "content-type": "application/json"})
+    assert res2.status_code == 200
+
+    res = await client.get("/api/v1/entitlements/me?product=devgenie", headers=admin["headers"])
+    assert res.status_code == 200
+    data = res.json()
+    assert data["tier"] == "enterprise"
+    assert data["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_webhook_subscription_updated_period_end_in_past_is_lite(client, db_session, admin, billing_settings):
+    # Activate pro subscription
+    checkout_event = {
+        "id": "evt_upd3_chk",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_upd3",
+                "customer": "cus_test123",
+                "subscription": "sub_upd3",
+                "metadata": {
+                    "org_id": admin["org_id"],
+                    "price_id": "price_pro",
+                },
+            },
+        },
+    }
+    payload, sig = sign(checkout_event)
+    res = await client.post("/webhooks/stripe", content=payload, headers={"Stripe-Signature": sig, "content-type": "application/json"})
+    assert res.status_code == 200
+
+    # Post update with status active but current_period_end in the past
+    past_ts = int(time.time()) - 86400
+    update_event = {
+        "id": "evt_upd3_upd",
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": "sub_upd3",
+                "status": "active",
+                "current_period_end": past_ts,
+                "items": {"data": [{"price": {"id": "price_pro"}}]},
+            },
+        },
+    }
+    payload2, sig2 = sign(update_event)
+    res2 = await client.post("/webhooks/stripe", content=payload2, headers={"Stripe-Signature": sig2, "content-type": "application/json"})
+    assert res2.status_code == 200
+
+    res = await client.get("/api/v1/entitlements/me?product=devgenie", headers=admin["headers"])
+    assert res.status_code == 200
+    data = res.json()
+    assert data["tier"] == "lite"
+    assert data["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_billing_webhook_writes_audit_event(client, db_session, admin, billing_settings):
+    # Initial checkout.session.completed
+    checkout_event = {
+        "id": "evt_upd4_chk",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_upd4",
+                "customer": "cus_test123",
+                "subscription": "sub_upd4",
+                "metadata": {
+                    "org_id": admin["org_id"],
+                    "price_id": "price_pro",
+                },
+            },
+        },
+    }
+    payload, sig = sign(checkout_event)
+    res = await client.post("/webhooks/stripe", content=payload, headers={"Stripe-Signature": sig, "content-type": "application/json"})
+    assert res.status_code == 200
+
+    # Assert an AuditEvent row exists with action == "billing_subscription_activated" for the org
+    events = (await db_session.execute(
+        select(AuditEvent).where(
+            AuditEvent.org_id == uuid.UUID(admin["org_id"]),
+            AuditEvent.action == "billing_subscription_activated",
+        )
+    )).scalars().all()
+    assert len(events) == 1
+    assert events[0].event_metadata["product"] == "devgenie"
+    assert events[0].event_metadata["tier"] == "pro"
+    assert events[0].event_metadata["stripe_subscription_id"] == "sub_upd4"
+
+    # Post customer.subscription.updated to exercise updated branch and verify billing_subscription_updated audit event
+    update_event = {
+        "id": "evt_upd4_upd",
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": "sub_upd4",
+                "status": "active",
+                "current_period_end": int(time.time()) + 86400,
+                "items": {"data": [{"price": {"id": "price_pro"}}]},
+            },
+        },
+    }
+    payload2, sig2 = sign(update_event)
+    res2 = await client.post("/webhooks/stripe", content=payload2, headers={"Stripe-Signature": sig2, "content-type": "application/json"})
+    assert res2.status_code == 200
+
+    upd_events = (await db_session.execute(
+        select(AuditEvent).where(
+            AuditEvent.org_id == uuid.UUID(admin["org_id"]),
+            AuditEvent.action == "billing_subscription_updated",
+        )
+    )).scalars().all()
+    assert len(upd_events) == 1
+    assert upd_events[0].event_metadata["stripe_subscription_id"] == "sub_upd4"
+    assert upd_events[0].event_metadata["status"] == "active"
