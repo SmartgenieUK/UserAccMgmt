@@ -10,9 +10,10 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.main import app
-from app.models import ExternalIdentity, Membership, Plan, Subscription, User
+from app.models import Credential, ExternalIdentity, Membership, Plan, Subscription, User
 from app.models.enums import ExternalProvider
 from app.security.entra_jwt import ENTRA_AUTH_EVENTS_APP_ID
+from app.security.hashing import hash_password
 
 TENANT_ID = "e11f2537-237e-48cd-b3f1-54b0ff7e5835"
 ISSUER = f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
@@ -149,6 +150,33 @@ async def test_unmapped_client_app_returns_empty_claims(entra_client, rsa_keypai
     )
     assert res.status_code == 200, res.text
     assert _claims(res.json()) == {}
+
+
+async def test_unverified_squatter_account_is_claimed_and_credential_dropped(entra_client, db_session, rsa_keypair):
+    """A verified Entra email is authoritative over an UNVERIFIED local account: the callout claims it and
+    drops the squatter's untrusted credential, so a pre-registration attacker's password cannot ride the
+    victim's federated identity (review finding, CRITICAL account-takeover)."""
+    squatter = User(email="victim@customer.example", normalized_email="victim@customer.example", is_verified=False)
+    db_session.add(squatter)
+    await db_session.flush()
+    db_session.add(Credential(user_id=squatter.id, password_hash=hash_password("SquatterPass1!")))
+    await db_session.commit()
+
+    res = await entra_client.post(
+        ENDPOINT,
+        headers={"Authorization": f"Bearer {_token(rsa_keypair)}"},
+        json=_callout("entra-sub-victim", mail="victim@customer.example"),
+    )
+    assert res.status_code == 200, res.text
+
+    users = (await db_session.execute(select(User).where(User.normalized_email == "victim@customer.example"))).scalars().all()
+    assert len(users) == 1
+    user = users[0]
+    assert user.is_verified is True
+    cred = (await db_session.execute(select(Credential).where(Credential.user_id == user.id))).scalar_one_or_none()
+    assert cred is None  # the untrusted squatter credential is gone — the attacker's password no longer logs in
+    ident = (await db_session.execute(select(ExternalIdentity).where(ExternalIdentity.provider_user_id == "entra-sub-victim"))).scalar_one()
+    assert ident.user_id == user.id
 
 
 async def test_wrong_azp_is_rejected(entra_client, rsa_keypair):

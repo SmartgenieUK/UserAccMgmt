@@ -52,7 +52,12 @@ class IdentityLinkService:
             self.session.add(user)
             await self.session.flush()
         elif email_verified and not user.is_verified:
+            # An Entra-verified email is authoritative over an UNVERIFIED local account (which proves
+            # nothing). Claim it, and DROP any untrusted local credential so a pre-registration squatter's
+            # password cannot ride the victim's federated identity (review finding 2026-09-14, CRITICAL
+            # account-takeover). delete-orphan on the credential relationship removes it on flush.
             user.is_verified = True
+            user.credential = None
 
         self.session.add(
             ExternalIdentity(

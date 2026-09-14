@@ -135,7 +135,18 @@ class Settings(BaseSettings):
                 import json
 
                 return json.loads(value)
-            return dict(pair.split("=", 1) for pair in value.split(",") if pair.strip())
+            result = {}
+            for pair in value.split(","):
+                pair = pair.strip()
+                if not pair:
+                    continue
+                if "=" not in pair:
+                    # Fail loud with a clear message rather than a cryptic dict() ValueError on a
+                    # malformed entry (review finding 2026-09-14).
+                    raise ValueError(f"ENTRA_PRODUCT_APP_IDS entry '{pair}' is not appId=product")
+                app_id, product = pair.split("=", 1)
+                result[app_id.strip()] = product.strip()
+            return result
         return value
 
 

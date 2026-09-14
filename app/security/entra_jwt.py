@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from functools import lru_cache
-
 import jwt
 
 from app.core.config import Settings
@@ -13,18 +11,16 @@ from app.core.exceptions import AppError, AuthError
 ENTRA_AUTH_EVENTS_APP_ID = "99045fe1-7639-4a75-9d4a-577b6ca3810f"
 
 
-@lru_cache(maxsize=4)
-def _jwks_client(jwks_url: str):
-    # Cached per URL so Entra's signing keys are fetched once, not per callout.
-    return jwt.PyJWKClient(jwks_url)
-
-
 def _signing_key(settings: Settings, token: str):
+    # This endpoint is a Tier-0 sign-in dependency and the plan (W3.3) forbids outbound calls on the hot
+    # path, so verification uses a PINNED public key held in config — never a per-callout JWKS fetch. A
+    # per-request PyJWKClient fetch would both block the async loop and let a random-`kid` flood on this
+    # rate-limit-exempt endpoint hammer Microsoft (review finding 2026-09-14, HIGH DoS). A key that rotates
+    # with Entra needs a startup-cached, non-blocking refresh — that is the deploy-edge verifier (W3.8),
+    # built when the live tenant is wired, not a per-request fetch here.
     if settings.ENTRA_SIGNING_PUBLIC_KEY_PEM:
         return settings.ENTRA_SIGNING_PUBLIC_KEY_PEM
-    if settings.ENTRA_JWKS_URL:
-        return _jwks_client(settings.ENTRA_JWKS_URL).get_signing_key_from_jwt(token).key
-    raise AppError("Entra signing key not configured", status_code=500, code="entra_not_configured")
+    raise AppError("Entra signing public key not configured (pin ENTRA_SIGNING_PUBLIC_KEY_PEM)", status_code=500, code="entra_not_configured")
 
 
 def verify_callout_token(settings: Settings, token: str) -> dict:
