@@ -44,7 +44,9 @@ class EntitlementService:
     async def resolve(self, org_id: str, product: str) -> Entitlement:
         subscription = await self._subscription(org_id, product)
         plan: Plan | None = None
-        if subscription and subscription.status in ENTITLING_STATUSES and (
+        # A deactivated plan (is_active=False) no longer entitles — fall through to the free tier,
+        # never keep serving a paid tier from a plan that has been withdrawn (review finding, 2026-09-14).
+        if subscription and subscription.status in ENTITLING_STATUSES and subscription.plan.is_active and (
             subscription.current_period_end is None or subscription.current_period_end > utcnow()
         ):
             plan = subscription.plan
@@ -92,6 +94,10 @@ class EntitlementService:
     async def assign_seat(self, org_id: str, product: str, user_id: str, actor_user_id: str) -> Entitlement:
         membership = await self._membership(org_id, user_id)
         if product not in membership.products:
+            # Serialise concurrent seat assignments on the subscription row so two callers cannot each
+            # see the last seat free and both write past the cap (review finding, 2026-09-14). No-op on
+            # sqlite (tests), row lock on PostgreSQL (production).
+            await self._lock_subscription(org_id, product)
             entitlement = await self.resolve(org_id, product)
             if entitlement.seats is not None and entitlement.seats_used >= entitlement.seats:
                 raise ConflictError("No seats available", code="seat_cap")
@@ -121,6 +127,15 @@ class EntitlementService:
             select(Subscription).where(Subscription.org_id == org_id, Subscription.product == product)
         )
         return result.scalar_one_or_none()
+
+    async def _lock_subscription(self, org_id: str, product: str) -> None:
+        """Take a row lock on the org's subscription for a seat mutation. SELECT ... FOR UPDATE on
+        PostgreSQL; a harmless no-op on sqlite, which serialises writes anyway."""
+        await self.session.execute(
+            select(Subscription.id)
+            .where(Subscription.org_id == org_id, Subscription.product == product)
+            .with_for_update()
+        )
 
     async def _plan(self, product: str, code: str) -> Plan:
         result = await self.session.execute(

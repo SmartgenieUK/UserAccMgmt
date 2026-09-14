@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from app.models import Membership, Role, Subscription
+from app.models import Membership, Plan, Role, Subscription
 from app.utils.time import utcnow
 
 PASSWORD = "StrongPass1!"
@@ -131,3 +131,17 @@ async def test_lapsed_subscription_falls_back_to_lite(client, db_session, admin,
 
     me = await client.get("/api/v1/entitlements/me", params={"product": PRODUCT}, headers=admin["headers"])
     assert me.json()["tier"] == "lite" and me.json()["status"] == status
+
+
+async def test_deactivated_plan_falls_back_to_lite(client, db_session, admin):
+    """A withdrawn plan (is_active=False) must not keep serving its paid tier (review finding)."""
+    base = f"/api/v1/orgs/{admin['org_id']}/entitlements/{PRODUCT}"
+    assert (await client.put(base, json={"tier": "pro"}, headers=admin["headers"])).status_code == 200
+
+    sub = (await db_session.execute(select(Subscription).where(Subscription.org_id == admin["org_id"]))).scalar_one()
+    plan = await db_session.get(Plan, sub.plan_id)
+    plan.is_active = False
+    await db_session.commit()
+
+    me = await client.get("/api/v1/entitlements/me", params={"product": PRODUCT}, headers=admin["headers"])
+    assert me.json()["tier"] == "lite" and me.json()["status"] == "active"
