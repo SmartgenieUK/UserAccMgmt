@@ -102,3 +102,24 @@ class MicrosoftProvider(BaseOAuthProvider):
     @property
     def client_secret(self) -> str:
         return self.settings.MICROSOFT_CLIENT_SECRET or ""
+
+
+class EntraExternalProvider(BaseOAuthProvider):
+    name = "entra_external"
+
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        base = f"https://{settings.ENTRA_TENANT_DOMAIN}.ciamlogin.com/{settings.ENTRA_TENANT_ID}/oauth2/v2.0"
+        self.authorization_endpoint = f"{base}/authorize"
+        self.token_endpoint = f"{base}/token"
+        self.userinfo_endpoint = "https://graph.microsoft.com/oidc/userinfo"
+        self.scopes = ["openid", "email", "profile"]
+
+    @property
+    def client_id(self) -> str:
+        return self.settings.ENTRA_CLIENT_ID or ""
+
+    @property
+    def client_secret(self) -> str:
+        return self.settings.ENTRA_CLIENT_SECRET or ""
+

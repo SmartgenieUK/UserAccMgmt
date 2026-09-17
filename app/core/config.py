@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Entra custom-claims-provider (W3). ENTRA_ISSUER selects the tenant type as config, not code:
     # workforce = https://login.microsoftonline.com/{tenant}/v2.0, external = https://<dom>.ciamlogin.com/{tenant}/v2.0.
     ENTRA_TENANT_ID: str | None = None
+    ENTRA_TENANT_DOMAIN: str | None = None
+    ENTRA_CLIENT_ID: str | None = None
+    ENTRA_CLIENT_SECRET: str | None = None
     ENTRA_ISSUER: str | None = None
     ENTRA_EXTENSION_APP_ID: str | None = None  # aud the inbound callout token must carry
     ENTRA_JWKS_URL: str | None = None  # production: Entra's signing keys, fetched + cached by PyJWKClient

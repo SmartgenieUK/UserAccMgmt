@@ -12,7 +12,7 @@ from app.services.oauth_service import OAuthService
 from app.services.token_service import TokenService
 from app.services.email_service import EmailService
 from app.services.audit_service import AuditService
-from app.services.oauth_providers import GoogleProvider, MicrosoftProvider
+from app.services.oauth_providers import GoogleProvider, MicrosoftProvider, EntraExternalProvider
 
 router = APIRouter()
 
@@ -27,6 +27,8 @@ async def oauth_authorize(
 ):
     registry.register_oauth_provider(GoogleProvider(settings))
     registry.register_oauth_provider(MicrosoftProvider(settings))
+    if settings.ENTRA_TENANT_DOMAIN and settings.ENTRA_CLIENT_ID:
+        registry.register_oauth_provider(EntraExternalProvider(settings))
     service = OAuthService(
         session=session,
         settings=settings,
@@ -51,6 +53,8 @@ async def oauth_callback(
 ):
     registry.register_oauth_provider(GoogleProvider(settings))
     registry.register_oauth_provider(MicrosoftProvider(settings))
+    if settings.ENTRA_TENANT_DOMAIN and settings.ENTRA_CLIENT_ID:
+        registry.register_oauth_provider(EntraExternalProvider(settings))
     service = OAuthService(
         session=session,
         settings=settings,
