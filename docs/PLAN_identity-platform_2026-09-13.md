@@ -249,7 +249,7 @@ tenant work (WP1) starts after W0, runs alongside W1/W2, must be done before W3.
 
 ## 4. Decisions for the owner
 
-**D1 — keep hop 1 (W1 + W1-cutover) or skip straight to Entra?** With SmartConsent out, hop 1 costs one
+**D1 — keep hop 1 (W1 + W1-cutover) or skip straight to Entra? DECIDED 2026-09-17: KEEP HOP 1 (owner) — see `docs/DECISION_D1_keep-hop1-rs256_2026-09-17.md`.** With SmartConsent out, hop 1 costs one
 CloudGenie per-customer redeploy and buys: the minting key out of customer infra now, and CloudGenie already
 on `iss`/`aud`/`kid` so hop 2 is config. Skipping it saves that redeploy but leaves the shared-secret
 exposure open for the whole Entra long pole. **Recommend: keep hop 1.** Reversible: yes (config).
