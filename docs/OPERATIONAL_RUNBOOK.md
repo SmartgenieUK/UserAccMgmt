@@ -319,3 +319,74 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-login.ps1
 - IaC architecture: `docs/IAC_ARCHITECTURE.md`
 - Deployment guide: `docs/DEPLOYMENT_GUIDE.md`
 - User/API guide: `docs/USER_GUIDE.md`
+
+## 14. Entra Custom-Claims-Provider (Token-Issuance) Monitoring
+
+### 14.1 Overview and Tier-0 Criticality
+
+- **Endpoint:** `POST /api/v1/entra/token-issuance`
+- **Role:** Synchronously invoked by Microsoft Entra ID as a custom authentication extension (custom-claims-provider) during user sign-in to enrich the minted token with entitlement claims (`tier`, `org_id`, `account_id`, `scope`).
+- **Callout budget:** Entra enforces a strict ~2 s execution budget (including retries).
+- **Fail-closed behaviour:** If this endpoint fails or times out, Entra will not mint the token. An outage or latency degradation on this route blocks product sign-in platform-wide (Sev1).
+- **Performance invariant:** The hot path executes zero outbound network calls (public signing keys are pinned in config; runtime JWKS fetches are prohibited). Execution time is dominated by a single indexed database lookup (`find_or_create_user` and `EntitlementService.resolve`), typically completing in under 50–100 ms.
+
+### 14.2 Health Probes and Availability Checks
+
+- **Synthetic probe:** Configure an Azure Application Insights standard Web Test or external synthetic monitor targeting `POST /api/v1/entra/token-issuance`.
+- **Cheap auth-reject probe:** Issue a lightweight `POST` without a bearer token (or with a dummy bearer token).
+  - Response expected: `401 Unauthorized` (`{"detail":"Missing bearer token","code":"entra_no_bearer"}`).
+  - Assert `HTTP 401` as the passing health condition. This validates ingress routing, TLS termination, middleware chain, and FastAPI app availability without triggering database writes or mutating state.
+- **Exempt from rate limits and CSRF:**
+  - The endpoint is registered in `_RATE_LIMIT_EXEMPT` and uses stateless bearer authentication (CSRF exempt).
+  - High-frequency synthetic probes will not be throttled or blocked by the Redis rate limiter.
+
+### 14.3 Latency Monitoring and Thresholds
+
+- **Telemetry:** Monitor request duration in Application Insights for `POST /api/v1/entra/token-issuance`.
+- **Alert thresholds:**
+  - **Warning (p95 > 1.0 s):** Alert on-call. Leaves a 1.0 s safety buffer before Entra's 2 s cutoff. Indicates database contention or connection pool pressure.
+  - **Critical (p95 > 1.5 s or max > 1.8 s):** Immediate risk of Entra timeout errors and widespread login failure.
+- **Latency baseline:** Because no external network hops exist, any latency increase is attributable to PostgreSQL query performance, pool exhaustion, or container CPU throttling.
+
+### 14.4 Key Alert — Entra Sign-In Log Error 1003005
+
+- **Alert code:** `1003005 CustomExtensionTimedOut`
+- **Meaning:** Microsoft Entra reached its ~2 s callout limit without receiving a response from UAM and aborted token issuance.
+- **Impact:** Every single occurrence of this code is a user-visible sign-in failure.
+- **Telemetry surface:** Streamed from Entra ID Diagnostic Settings into Azure Log Analytics (`SignInLogs` table).
+- **Log Analytics alert query (KQL):**
+  ```kusto
+  SigninLogs
+  | where ResultType == "1003005"
+  | project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, ResultType, ResultDescription
+  ```
+- **Alert rule configuration:** Fire a Sev1 alert when `count > 0` over a 5-minute rolling window.
+
+### 14.5 Hosting Guard (No Scale to Zero)
+
+- **Minimum replicas:** The Container App instance must maintain `min-replicas >= 1` at all times (`az containerapp update --min-replicas 1 ...`). Never scale to zero.
+- **Cold-start risk:** A cold start (container boot, Python runtime initialisation, dependency loading, database pool connection) requires several seconds, which immediately exhausts Entra's 2 s callout budget.
+- **Production naming caveat:** The current live deployment carries `dev` in its resource naming (for example, workspace/profile `app1-dev` and container app names), but it serves as the live production sign-in dependency. It must never be idled, paused, or treated as disposable development infrastructure.
+
+### 14.6 First-Response Triage Checklist
+
+When responding to claims endpoint degradation or `1003005` alerts:
+
+1. **Confirm endpoint availability:**
+   - Probe the endpoint directly from CLI:
+     ```bash
+     curl -i -X POST https://<uam-host>/api/v1/entra/token-issuance
+     ```
+   - Confirm `401 Unauthorized` is returned promptly. Check `/api/v1/health` and `/api/v1/ready`.
+2. **Check recent deployments:**
+   - Check recent container app revisions or configuration updates. If a deployment introduced a regression, roll back immediately to the last known-good revision (`az containerapp revision activate ...`).
+3. **Check database health and latency:**
+   - Inspect PostgreSQL Flexible Server metrics (CPU utilisation, connection count, query duration).
+   - Check application logs for database pool timeouts or lock contention.
+4. **Check pinned Entra signing key configuration:**
+   - Verify `ENTRA_SIGNING_PUBLIC_KEY_PEM`, `ENTRA_ISSUER`, and `ENTRA_EXTENSION_APP_ID` in Key Vault and environment variables.
+   - If Entra rotated its authentication-events signing keys in the tenant, the pinned key will reject valid callouts with `401 entra_token_invalid`. Update `ENTRA_SIGNING_PUBLIC_KEY_PEM` from tenant metadata and restart the revision.
+5. **Verify fail-closed expectation:**
+   - The claims provider must fail closed. Under no circumstances should a token without an entitlement `tier` be issued to unblock sign-in.
+   - A `5xx` error is the correct and expected system response to database faults or internal errors (preventing unauthorised access); minting a token with missing or incorrect claims is not acceptable.
+
