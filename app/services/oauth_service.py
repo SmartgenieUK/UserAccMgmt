@@ -10,16 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import AuthError, ConflictError
 from app.core.plugins import PluginRegistry
-from app.models import User, ExternalIdentity, Credential, Membership, Organization
-from app.models.enums import ExternalProvider, Role
-from app.security.hashing import hash_password
+from app.models import Membership, User
+from app.models.enums import ExternalProvider
 from app.security.permissions import resolve_scopes
-from app.services.token_service import TokenService
-from app.services.email_service import EmailService
 from app.services.audit_service import AuditService
+from app.services.email_service import EmailService
+from app.services.identity_link_service import IdentityLinkService
 from app.services.oauth_providers import OAuthUserInfo
-from app.utils.security import generate_pkce_pair, normalize_email
-from app.utils.validation import slugify
+from app.services.token_service import TokenService
+from app.utils.security import generate_pkce_pair
 
 
 @dataclass
@@ -99,51 +98,13 @@ class OAuthService:
         if not user_info.email or not user_info.email_verified:
             raise AuthError("Email not verified by provider", code="oauth_email_unverified")
 
-        normalized = normalize_email(user_info.email)
-        result = await self.session.execute(
-            select(ExternalIdentity).where(
-                ExternalIdentity.provider == ExternalProvider(provider_name),
-                ExternalIdentity.provider_user_id == user_info.sub,
-            )
+        user = await IdentityLinkService(self.session).find_or_create_user(
+            provider=ExternalProvider(provider_name),
+            provider_user_id=user_info.sub,
+            email=user_info.email,
+            display_name=user_info.name,
+            email_verified=user_info.email_verified,
         )
-        identity = result.scalar_one_or_none()
-
-        if identity:
-            user = await self.session.get(User, identity.user_id)
-        else:
-            result = await self.session.execute(select(User).where(User.normalized_email == normalized))
-            user = result.scalar_one_or_none()
-            if user:
-                if not user.is_verified:
-                    user.is_verified = True
-                identity = ExternalIdentity(
-                    user_id=user.id,
-                    provider=ExternalProvider(provider_name),
-                    provider_user_id=user_info.sub,
-                    email=user_info.email,
-                )
-                self.session.add(identity)
-            else:
-                user = User(
-                    email=user_info.email,
-                    normalized_email=normalized,
-                    display_name=user_info.name,
-                    avatar_url=user_info.picture,
-                    is_verified=True,
-                )
-                self.session.add(user)
-                await self.session.flush()
-                credential = Credential(user_id=user.id, password_hash=hash_password(secrets.token_urlsafe(32)))
-                self.session.add(credential)
-                identity = ExternalIdentity(
-                    user_id=user.id,
-                    provider=ExternalProvider(provider_name),
-                    provider_user_id=user_info.sub,
-                    email=user_info.email,
-                )
-                self.session.add(identity)
-
-            await self._ensure_personal_org(user)
 
         await self.audit_service.log_event(
             action="oauth_login",
@@ -162,16 +123,6 @@ class OAuthService:
         )
         refresh_token = await self.token_service.create_refresh_token(str(user.id), None, None)
         return access_token, refresh_token, expires_in
-
-    async def _ensure_personal_org(self, user: User) -> None:
-        result = await self.session.execute(select(Membership).where(Membership.user_id == user.id))
-        if result.scalars().first():
-            return
-        name = f"{user.display_name or user.email}'s Org"
-        org = Organization(name=name, slug=slugify(name))
-        self.session.add(org)
-        await self.session.flush()
-        self.session.add(Membership(user_id=user.id, org_id=org.id, role=Role.ADMIN))
 
     async def _get_primary_membership(self, user: User) -> Membership:
         # Earliest membership is the default org (plan D2, 2026-09-14).
