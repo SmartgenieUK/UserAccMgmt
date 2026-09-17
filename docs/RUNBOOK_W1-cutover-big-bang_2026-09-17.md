@@ -63,5 +63,5 @@ Both sides are config/revision flips; no data migration, so rollback is a few mi
   is the tidy that closes the exposure fully.
 
 ## Owner inputs still needed
-- The deploy window (a single short window; 15-minute token TTL means minimal re-login impact).
+- Deploy timing: no scheduled window — deploy when convenient (owner, 2026-09-17); 15-minute token TTL keeps re-login impact minimal.
 - Confirm the `jwt-private-key-pem` Key Vault secret exists and is wired to the live UAM instance.
