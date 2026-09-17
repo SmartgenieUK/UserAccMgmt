@@ -65,3 +65,5 @@ Both sides are config/revision flips; no data migration, so rollback is a few mi
 ## Owner inputs still needed
 - Deploy timing: no scheduled window — deploy when convenient (owner, 2026-09-17); 15-minute token TTL keeps re-login impact minimal.
 - Confirm the `jwt-private-key-pem` Key Vault secret exists and is wired to the live UAM instance.
+
+> STEP 0 IS A HITL OWNER ACTION: see `docs/HITL_uam-rs256-key-provisioning_2026-09-17.md` (key gen + KV + RS256 env + UAM rebuild). Nothing here deploys until UAM serves JWKS.
