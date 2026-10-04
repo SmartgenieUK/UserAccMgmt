@@ -28,3 +28,6 @@ class TokenPayload(APIModel):
     client_id: str | None = None
     iat: int = 0
     exp: int = 0
+    # RS256 tokens carry these; decode_access_token has already verified them.
+    iss: str | None = None
+    aud: str | list[str] | None = None

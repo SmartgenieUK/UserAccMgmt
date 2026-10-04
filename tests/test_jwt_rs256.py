@@ -118,3 +118,13 @@ async def test_jwks_and_discovery_endpoints(client, rs_settings, rsa_keypair):
 
 async def test_jwks_is_empty_without_a_key(client):
     assert (await client.get("/.well-known/jwks.json")).json() == {"keys": []}
+
+
+async def test_rs256_token_passes_the_route_guard(rs_settings):
+    # UAM's own guarded routes (/me, /orgs) must accept the iss/aud an RS256 token carries.
+    from fastapi.security import HTTPAuthorizationCredentials
+    from app.security.dependencies import get_token_payload
+
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=_mint(rs_settings))
+    payload = await get_token_payload(creds, rs_settings)
+    assert payload.sub == "user-1" and payload.scopes == SCOPES
