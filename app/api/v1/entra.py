@@ -7,7 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import AuthError, ValidationError
+from app.core.exceptions import AuthError
 from app.db.session import get_session
 from app.models.enums import ExternalProvider
 from app.schemas.entra import EntraCalloutRequest, provide_claims_response
@@ -50,19 +50,15 @@ async def entra_token_issuance(
     verify_callout_token(settings, credentials.credentials)
 
     ctx = payload.data.authenticationContext
-    email = ctx.user.mail or ctx.user.userPrincipalName
-    if not email:
-        raise ValidationError("Entra callout carried no email", code="entra_no_email")
-
-    link = IdentityLinkService(session)
-    user = await link.find_or_create_user(
-        ExternalProvider.ENTRA_EXTERNAL, ctx.user.id, email, ctx.user.displayName
-    )
-
+    # Resolve ONLY an existing link by Entra user id; never create or join an account by email (CR-208
+    # certification F1, amendment A1). An unlinked or deactivated user gets an empty claims set: sign-in
+    # proceeds with no entitlement asserted. Linking happens on the portal, by verified oid.
     claims: dict = {}
     product = settings.ENTRA_PRODUCT_APP_IDS.get(ctx.clientServicePrincipal.appId or "")
-    if product:
-        membership = await link.primary_membership(user)
+    link = IdentityLinkService(session)
+    user = await link.find_linked_user(ExternalProvider.ENTRA_EXTERNAL, ctx.user.id) if product else None
+    membership = await link.primary_membership(user) if user else None
+    if membership:
         service = EntitlementService(session, settings, AuditService(session, settings))
         entitlement = await service.resolve(str(membership.org_id), product)
         claims = _fit_budget(

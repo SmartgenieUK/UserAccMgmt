@@ -77,6 +77,19 @@ class IdentityLinkService:
         await self.session.flush()
         return user
 
+    async def find_linked_user(self, provider: ExternalProvider, provider_user_id: str) -> User | None:
+        """The active user already linked to this (provider, subject), or None. Never creates or joins."""
+        identity = (
+            await self.session.execute(
+                select(ExternalIdentity).where(
+                    ExternalIdentity.provider == provider,
+                    ExternalIdentity.provider_user_id == provider_user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        user = await self.session.get(User, identity.user_id) if identity else None
+        return user if user is not None and user.is_active else None
+
     async def _ensure_personal_org(self, user: User) -> None:
         existing = await self.session.execute(select(Membership).where(Membership.user_id == user.id))
         if existing.scalars().first():
