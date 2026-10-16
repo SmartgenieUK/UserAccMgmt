@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+
+import jwt
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from app.core.config import Settings
+from app.core.exceptions import AppError, AuthError
 
 
 @dataclass
 class OAuthUserInfo:
-    sub: str
+    sub: str  # the link key callers store as provider_user_id; for entra_external, the verified oid
     email: str
     email_verified: bool
     name: str | None
@@ -114,6 +118,7 @@ class EntraExternalProvider(BaseOAuthProvider):
         self.token_endpoint = f"{base}/token"
         self.userinfo_endpoint = "https://graph.microsoft.com/oidc/userinfo"
         self.scopes = ["openid", "email", "profile"]
+        self._jwks = None
 
     @property
     def client_id(self) -> str:
@@ -123,3 +128,53 @@ class EntraExternalProvider(BaseOAuthProvider):
     def client_secret(self) -> str:
         return self.settings.ENTRA_CLIENT_SECRET or ""
 
+    async def fetch_user_info(self, token_data: dict) -> OAuthUserInfo:
+        """Link by the VERIFIED ID token's `oid` (CR-208 work item B).
+
+        Graph userinfo's `sub` is pairwise — different for every application — so it cannot be the key the
+        claims callout and DevGenie's lookup share. `oid` is the user's object id, the same across the
+        tenant's applications. The ID token from the code exchange is verified (RS256 signature, issuer,
+        audience = this client, expiry) and its `sub` must equal userinfo's, binding the two responses to one
+        sign-in. Any failure is an AuthError; nothing is decoded unverified.
+        """
+        claims = await self._verify_id_token(token_data.get("id_token"))
+        info = await super().fetch_user_info(token_data)
+        if info.sub != claims.get("sub"):
+            raise AuthError("ID token and userinfo disagree", code="oauth_id_token_invalid")
+        info.sub = claims["oid"]
+        return info
+
+    async def _verify_id_token(self, id_token) -> dict:
+        if not self.settings.ENTRA_ISSUER or not self.client_id:
+            raise AppError("Entra issuer/client not configured", status_code=500, code="entra_not_configured")
+        if not isinstance(id_token, str) or not id_token:
+            raise AuthError("No ID token from the provider", code="oauth_id_token_invalid")
+        try:
+            key = await self._signing_key(id_token)
+            claims = jwt.decode(
+                id_token,
+                key,
+                algorithms=["RS256"],
+                audience=self.client_id,
+                issuer=self.settings.ENTRA_ISSUER,
+                options={"require": ["exp", "iss", "aud", "sub"]},
+            )
+        except AppError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any decode failure is an auth failure
+            raise AuthError("Invalid ID token", code="oauth_id_token_invalid") from exc
+        if not isinstance(claims.get("oid"), str) or not claims["oid"]:
+            raise AuthError("ID token carries no oid", code="oauth_id_token_invalid")
+        return claims
+
+    async def _signing_key(self, id_token: str):
+        # A pinned key wins (tests, or no outbound fetch). Otherwise the tenant's JWKS through PyJWKClient,
+        # which caches keys; the fetch runs off the event loop. Portal sign-in is not the Tier-0 callout path,
+        # so a cached JWKS fetch here is acceptable.
+        if self.settings.ENTRA_SIGNING_PUBLIC_KEY_PEM:
+            return self.settings.ENTRA_SIGNING_PUBLIC_KEY_PEM
+        if self.settings.ENTRA_JWKS_URL:
+            if self._jwks is None:
+                self._jwks = jwt.PyJWKClient(self.settings.ENTRA_JWKS_URL)
+            return (await asyncio.to_thread(self._jwks.get_signing_key_from_jwt, id_token)).key
+        raise AppError("Entra signing key not configured", status_code=500, code="entra_not_configured")

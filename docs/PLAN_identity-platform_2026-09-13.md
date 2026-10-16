@@ -178,6 +178,18 @@ claims-mapping-policy config (WP1), and W3.8 monitoring. **Deferred:** W3.5's oa
 random-password `Credential` drop, and W3.6 portal provider — both touch live login, so they get their
 own change + review. **Rule 7 review OWED** (codex BLOCKED 4%, agy unrecorded at build time).
 
+**STATUS 2026-10-16 — devgenie-core CR-208 items B and C built (branch `cr-208-uam-lookup`, not deployed).**
+(B) Portal sign-in through `entra_external` now links `provider_user_id` = the verified ID token's `oid`
+(RS256, issuer `ENTRA_ISSUER`, audience `ENTRA_CLIENT_ID`, expiry; its `sub` must match Graph userinfo's),
+not userinfo's pairwise `sub` — the same key the claims callout already uses. (C) New service route
+`GET /api/v1/internal/entitlements/by-subject?provider=entra&oid=&product=` for DevGenie's server: header
+`X-Service-Secret` vs new `DEVGENIE_SERVICE_SECRET` (unset = 404), returns `{tier, status, expires_at,
+org_id, account_id = UAM user id}` from `EntitlementService.resolve` on the primary org; unknown oid,
+deactivated user = 404; no JIT creation. Existing `entra_external` rows linked by a pairwise sub are left
+as they are (no migration): such a person re-links by verified email on next portal sign-in, gaining an
+oid row. Owner, after acceptance: set `DEVGENIE_SERVICE_SECRET` (Key Vault) on UAM and the same value on
+devgenie-core, and deploy.
+
 | # | Change | File |
 |---|---|---|
 | W3.1 | Config: `ENTRA_TENANT_ID`, `ENTRA_TENANT_DOMAIN`, `ENTRA_ISSUER`, `ENTRA_JWKS_URL`, `ENTRA_CLIENT_ID/SECRET` (UAM's portal RP), `ENTRA_EXTENSION_APP_ID` (aud for inbound calls), `ENTRA_PRODUCT_APP_IDS` (client `appId` → product) | `app/core/config.py:53-60` |

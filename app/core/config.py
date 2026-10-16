@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     ENTRA_JWKS_URL: str | None = None  # production: Entra's signing keys, fetched + cached by PyJWKClient
     ENTRA_SIGNING_PUBLIC_KEY_PEM: str | None = None  # pin the key (no outbound fetch) / test seam
     ENTRA_PRODUCT_APP_IDS: dict[str, str] = {}  # calling client appId -> product
+    # CR-208: shared secret DevGenie's server presents (X-Service-Secret) on the internal entitlement lookup.
+    # Unset = the lookup route answers 404 to everyone. Key Vault -> env var; never logged or echoed.
+    DEVGENIE_SERVICE_SECRET: str | None = None
 
     STRIPE_API_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
