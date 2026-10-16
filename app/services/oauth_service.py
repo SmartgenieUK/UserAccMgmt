@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import secrets
 from dataclasses import dataclass
@@ -10,15 +11,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import AuthError, ConflictError
 from app.core.plugins import PluginRegistry
-from app.models import Membership, User
+from app.models import ExternalIdentity, Membership, User
 from app.models.enums import ExternalProvider
 from app.security.permissions import resolve_scopes
 from app.services.audit_service import AuditService
 from app.services.email_service import EmailService
 from app.services.identity_link_service import IdentityLinkService
 from app.services.oauth_providers import OAuthUserInfo
+from app.services.rate_limit_service import RateLimiter
 from app.services.token_service import TokenService
-from app.utils.security import generate_pkce_pair
+from app.utils.security import generate_pkce_pair, normalize_email
+
+MAX_VERIFY_ATTEMPTS = 5  # per pending sign-in; the 6th attempt is refused even with the right code
+
+
+@dataclass
+class VerificationRequired:
+    """The callback's answer when the provider did not verify the email: a code was sent, nothing was linked."""
+
+    pending_id: str
+    email_hint: str
 
 
 @dataclass
@@ -75,6 +87,7 @@ class OAuthService:
         self.token_service = token_service
         self.email_service = email_service
         self.audit_service = audit_service
+        self.redis = redis
         self.state_store = OAuthStateStore(redis, settings)
 
     async def authorization_url(self, provider_name: str, redirect_uri: str | None) -> tuple[str, str]:
@@ -95,21 +108,85 @@ class OAuthService:
         token_data = await provider.exchange_code(code=code, redirect_uri=redirect, code_verifier=state_data.code_verifier)
         user_info: OAuthUserInfo = await provider.fetch_user_info(token_data)
 
-        if not user_info.email or not user_info.email_verified:
+        if not user_info.email:
             raise AuthError("Email not verified by provider", code="oauth_email_unverified")
+        # Owner ruling 2026-10-16 (CR-208 certification F1): every sign-in needs a verified email. An identity
+        # already linked signs in directly; otherwise an unverified email gets a one-time code and nothing is
+        # created, linked or issued until POST /oauth/verify proves the address.
+        if not user_info.email_verified and not await self._is_linked(provider_name, user_info.sub):
+            return await self._start_verification(provider_name, user_info)
+        return await self._sign_in(provider_name, user_info.sub, user_info.email, user_info.name, user_info.email_verified)
 
+    async def verify(self, pending_id: str, otp: str):
+        """Complete a pending sign-in with the emailed code: single use, 5 attempts, expires with the code."""
+        key = self._pending_key(pending_id)
+        raw = await self.redis.get(key) if self.redis else None
+        if not raw:
+            raise AuthError("Invalid or expired code", code="otp_invalid")
+        attempts = await self.redis.incr(f"{key}:attempts")
+        if attempts == 1:
+            await self.redis.expire(f"{key}:attempts", self.settings.OTP_EXPIRE_MINUTES * 60)
+        pending = json.loads(raw)
+        if attempts > MAX_VERIFY_ATTEMPTS or not hmac.compare_digest(otp.encode(), pending["otp"].encode()):
+            if attempts >= MAX_VERIFY_ATTEMPTS:
+                await self.redis.delete(key)
+            raise AuthError("Invalid or expired code", code="otp_invalid")
+        if not await self.redis.delete(key):  # a concurrent verify already used it
+            raise AuthError("Invalid or expired code", code="otp_invalid")
+        return await self._sign_in(
+            pending["provider"], pending["provider_user_id"], pending["email"], pending["display_name"], True, via="email_code"
+        )
+
+    async def _is_linked(self, provider_name: str, provider_user_id: str) -> bool:
+        result = await self.session.execute(
+            select(ExternalIdentity.id).where(
+                ExternalIdentity.provider == ExternalProvider(provider_name),
+                ExternalIdentity.provider_user_id == provider_user_id,
+            )
+        )
+        return result.first() is not None
+
+    async def _start_verification(self, provider_name: str, user_info: OAuthUserInfo) -> VerificationRequired:
+        if not self.redis:
+            raise AuthError("Email verification unavailable", code="otp_unavailable")
+        await RateLimiter(self.redis).hit(
+            f"email_recipient:{normalize_email(user_info.email)}",
+            self.settings.RATE_LIMIT_EMAIL_PER_RECIPIENT_PER_HOUR,
+            3600,
+        )
+        pending_id = secrets.token_urlsafe(32)
+        otp = self.email_service.generate_otp()
+        pending = {
+            "provider": provider_name,
+            "provider_user_id": user_info.sub,
+            "email": user_info.email,
+            "display_name": user_info.name,
+            "otp": otp,
+        }
+        await self.redis.setex(self._pending_key(pending_id), self.settings.OTP_EXPIRE_MINUTES * 60, json.dumps(pending))
+        await self.email_service.send_verification_email(user_info.email, otp)
+        local, _, domain = user_info.email.partition("@")
+        return VerificationRequired(pending_id=pending_id, email_hint=f"{local[:1]}•••@{domain}")
+
+    @staticmethod
+    def _pending_key(pending_id: str) -> str:
+        return f"oauth:pending:{pending_id}"
+
+    async def _sign_in(
+        self, provider_name: str, provider_user_id: str, email: str, display_name: str | None, email_verified: bool, via: str = "provider"
+    ):
         user = await IdentityLinkService(self.session).find_or_create_user(
             provider=ExternalProvider(provider_name),
-            provider_user_id=user_info.sub,
-            email=user_info.email,
-            display_name=user_info.name,
-            email_verified=user_info.email_verified,
+            provider_user_id=provider_user_id,
+            email=email,
+            display_name=display_name,
+            email_verified=email_verified,
         )
 
         await self.audit_service.log_event(
             action="oauth_login",
             user_id=str(user.id),
-            metadata={"provider": provider_name},
+            metadata={"provider": provider_name, "email_verified_by": via},
         )
 
         membership = await self._get_primary_membership(user)

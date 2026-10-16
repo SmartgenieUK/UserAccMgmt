@@ -53,7 +53,7 @@ class FakeRedis:
         return self.store.get(key)
 
     async def delete(self, key):
-        self.store.pop(key, None)
+        return 1 if self.store.pop(key, None) is not None else 0
 
     async def incr(self, key):
         self.store[key] = str(int(self.store.get(key, "0")) + 1)

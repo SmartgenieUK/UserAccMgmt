@@ -186,3 +186,13 @@ async def test_deactivated_user_is_404_even_with_a_paid_subscription(svc, db_ses
     await db_session.commit()
     r = await svc.get(ENDPOINT, params=_params(), headers={"X-Service-Secret": SECRET})
     assert r.status_code == 404
+
+
+@pytest.mark.parametrize("status", [None, "trialing", "active", "past_due", "cancelled"])
+async def test_status_is_always_one_devgenie_accepts(svc, db_session, status):
+    """CR-208 certification F2: DevGenie's lookup accepts exactly this set; `none` = known user, no subscription."""
+    _, primary, _ = await _linked_user(db_session)
+    if status:
+        await _subscribe(db_session, primary, status=status)
+    body = (await svc.get(ENDPOINT, params=_params(), headers={"X-Service-Secret": SECRET})).json()
+    assert body["status"] in {"trialing", "active", "past_due", "cancelled", "none"}

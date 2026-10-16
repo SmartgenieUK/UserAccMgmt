@@ -68,3 +68,8 @@ class OAuthCallbackRequest(APIModel):
     code: str
     state: str
     redirect_uri: str | None = None
+
+
+class OAuthVerifyRequest(APIModel):
+    pending_id: str
+    otp: str

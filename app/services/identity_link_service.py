@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AuthError
 from app.models import ExternalIdentity, Membership, Organization, User
 from app.models.enums import ExternalProvider, Role
 from app.utils.security import normalize_email
@@ -12,7 +13,8 @@ from app.utils.validation import slugify
 class IdentityLinkService:
     """Resolves an external identity to a local user, creating one just-in-time.
 
-    Precedence: existing (provider, subject) link -> existing user by verified email (link it) -> a new
+    Precedence: existing (provider, subject) link -> existing user by verified email (link it; an unverified
+    email is refused) -> a new
     user with a personal org. This is the shared path for federated sign-in; the Entra claims provider (W3)
     is its first caller. Callers commit; this only adds/flushes.
     """
@@ -42,6 +44,10 @@ class IdentityLinkService:
         user = (
             await self.session.execute(select(User).where(User.normalized_email == normalized))
         ).scalar_one_or_none()
+        if user is not None and email_verified is not True:
+            # Never attach a new identity to an existing account on an unverified email: that is an
+            # account takeover (CR-208 certification F1). The OAuth callback verifies by one-time code first.
+            raise AuthError("Email not verified", code="identity_link_unverified")
         if user is None:
             user = User(
                 email=email,

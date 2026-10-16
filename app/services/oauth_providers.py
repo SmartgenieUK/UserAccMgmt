@@ -13,8 +13,8 @@ from app.core.exceptions import AppError, AuthError
 @dataclass
 class OAuthUserInfo:
     sub: str  # the link key callers store as provider_user_id; for entra_external, the verified oid
-    email: str
-    email_verified: bool
+    email: str | None  # None when the provider sent none; userPrincipalName is not an email
+    email_verified: bool  # True only when the provider said literal boolean true (CR-208 certification F1)
     name: str | None
     picture: str | None
 
@@ -61,8 +61,8 @@ class BaseOAuthProvider:
         await client.aclose()
         return OAuthUserInfo(
             sub=str(data.get("sub") or data.get("id")),
-            email=str(data.get("email") or data.get("userPrincipalName")),
-            email_verified=bool(data.get("email_verified", True)),
+            email=data.get("email") if isinstance(data.get("email"), str) and data.get("email") else None,
+            email_verified=data.get("email_verified") is True,
             name=data.get("name"),
             picture=data.get("picture"),
         )

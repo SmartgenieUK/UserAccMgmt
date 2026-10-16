@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_registry
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.schemas.auth import OAuthAuthorizeResponse, OAuthCallbackRequest
+from app.schemas.auth import OAuthAuthorizeResponse, OAuthCallbackRequest, OAuthVerifyRequest
 from app.schemas.token import TokenPair
-from app.services.oauth_service import OAuthService
+from app.services.oauth_service import OAuthService, VerificationRequired
 from app.services.token_service import TokenService
 from app.services.email_service import EmailService
 from app.services.audit_service import AuditService
@@ -64,10 +65,38 @@ async def oauth_callback(
         audit_service=AuditService(session, settings),
         redis=request.app.state.redis,
     )
-    access, refresh, expires_in = await service.callback(
+    result = await service.callback(
         provider_name=provider,
         code=data.code,
         state=data.state,
         redirect_uri=data.redirect_uri,
     )
+    if isinstance(result, VerificationRequired):
+        # The provider did not verify the email: a code was sent; finish with POST /oauth/verify.
+        return JSONResponse(
+            status_code=202,
+            content={"status": "verification_required", "pending_id": result.pending_id, "email_hint": result.email_hint},
+        )
+    access, refresh, expires_in = result
+    return TokenPair(access_token=access, refresh_token=refresh, expires_in=expires_in)
+
+
+@router.post("/oauth/verify", response_model=TokenPair)
+async def oauth_verify(
+    data: OAuthVerifyRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    settings=Depends(get_settings),
+    registry=Depends(get_registry),
+):
+    service = OAuthService(
+        session=session,
+        settings=settings,
+        registry=registry,
+        token_service=TokenService(session, settings),
+        email_service=EmailService(settings),
+        audit_service=AuditService(session, settings),
+        redis=request.app.state.redis,
+    )
+    access, refresh, expires_in = await service.verify(data.pending_id, data.otp)
     return TokenPair(access_token=access, refresh_token=refresh, expires_in=expires_in)
