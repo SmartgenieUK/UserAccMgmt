@@ -199,6 +199,9 @@ class OAuthService:
             scopes=scopes,
         )
         refresh_token = await self.token_service.create_refresh_token(str(user.id), None, None)
+        # Save the user, the provider link and the refresh token before the tokens go out, as login/register
+        # do: get_session closes without committing (CR-208 certification round 2, R2-F1).
+        await self.session.commit()
         return access_token, refresh_token, expires_in
 
     async def _get_primary_membership(self, user: User) -> Membership:

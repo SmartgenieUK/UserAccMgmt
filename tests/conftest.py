@@ -140,3 +140,33 @@ def rsa_keypair() -> tuple[bytes, bytes]:
         serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     return private_pem, public_pem
+
+
+@pytest.fixture()
+async def session_factory(engine):
+    """A session factory over the test DB, with the plan seed committed (for fresh_client)."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all(Plan(**plan) for plan in DEFAULT_PLANS)
+        await session.commit()
+    return factory
+
+
+@pytest.fixture()
+async def fresh_client(session_factory, fake_redis):
+    """Production's session model: a NEW session per request, closed without committing (like get_session).
+
+    What a route does not commit is lost, so a test that reads back through `session_factory` afterwards
+    proves the write is durable. The shared `client`/`db_session` fixtures cannot show that.
+    """
+
+    async def per_request_session():
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = per_request_session
+    app.state.redis = fake_redis
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+    app.state.redis = None
