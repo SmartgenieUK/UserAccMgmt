@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_registry
 from app.core.config import get_settings
+from app.core.exceptions import ValidationError
 from app.db.session import get_session
 from app.schemas.auth import OAuthAuthorizeResponse, OAuthCallbackRequest, OAuthVerifyRequest
 from app.schemas.token import TokenPair
@@ -17,11 +18,15 @@ from app.services.oauth_providers import GoogleProvider, MicrosoftProvider, Entr
 
 router = APIRouter()
 
+# Standard OAuth `domain_hint` values the authorize route passes through (Entra: skip to that federated IdP).
+ALLOWED_DOMAIN_HINTS = {"google"}
+
 
 @router.get("/oauth/{provider}/authorize", response_model=OAuthAuthorizeResponse)
 async def oauth_authorize(
     provider: str,
     request: Request,
+    domain_hint: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
     settings=Depends(get_settings),
     registry=Depends(get_registry),
@@ -39,7 +44,9 @@ async def oauth_authorize(
         audit_service=AuditService(session, settings),
         redis=request.app.state.redis,
     )
-    url, state = await service.authorization_url(provider, None)
+    if domain_hint is not None and domain_hint not in ALLOWED_DOMAIN_HINTS:
+        raise ValidationError("domain_hint not allowed", code="domain_hint_not_allowed")
+    url, state = await service.authorization_url(provider, None, domain_hint)
     return OAuthAuthorizeResponse(authorization_url=url, state=state)
 
 

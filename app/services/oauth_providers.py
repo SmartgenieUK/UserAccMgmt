@@ -29,7 +29,9 @@ class BaseOAuthProvider:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    async def authorization_url(self, state: str, redirect_uri: str, code_challenge: str | None) -> str:
+    async def authorization_url(
+        self, state: str, redirect_uri: str, code_challenge: str | None, domain_hint: str | None = None
+    ) -> str:
         client = AsyncOAuth2Client(
             client_id=self.client_id,
             redirect_uri=redirect_uri,
@@ -38,6 +40,8 @@ class BaseOAuthProvider:
         extra = {}
         if code_challenge:
             extra = {"code_challenge": code_challenge, "code_challenge_method": "S256"}
+        if domain_hint:  # standard OAuth parameter; the caller has already allow-listed it
+            extra["domain_hint"] = domain_hint
         url, _ = client.create_authorization_url(self.authorization_endpoint, state=state, **extra)
         await client.aclose()
         return url

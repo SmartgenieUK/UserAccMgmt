@@ -273,3 +273,78 @@ async def test_link_service_refuses_to_attach_to_an_existing_account_without_a_v
     assert await _links(db_session) == []
     user = await link.find_or_create_user(ExternalProvider.GOOGLE, ATTACKER_SUB, VICTIM, "Owner", email_verified=True)
     assert user.id == victim.id
+
+
+# --- BRIEF-008 Part 2: the four verification audit events, durable (read through a fresh session) ---------
+
+import hashlib
+
+from app.models import AuditEvent
+
+
+async def _events(session_factory, action=None):
+    async with session_factory() as s:
+        q = select(AuditEvent)
+        if action:
+            q = q.where(AuditEvent.action == action)
+        return (await s.execute(q)).scalars().all()
+
+
+async def _no_secrets(session_factory, *secrets):
+    for e in await _events(session_factory):
+        blob = json.dumps(e.event_metadata)
+        for secret in secrets:
+            assert secret not in blob, f"{e.action} metadata carries a secret"
+
+
+async def _fresh_pending(fresh_client, session_factory, fake_redis, userinfo, sent_otps, *, existing=True):
+    if existing:
+        async with session_factory() as s:
+            user = User(email=VICTIM, normalized_email=VICTIM, is_verified=True)
+            org = Organization(name="Victim Org", slug="victim-org-audit")
+            s.add_all([user, org])
+            await s.flush()
+            s.add(Membership(user_id=user.id, org_id=org.id, role=Role.ADMIN))
+            await s.commit()
+    userinfo.update({"sub": ATTACKER_SUB, "email": VICTIM})
+    r = await _callback(fresh_client, fake_redis)
+    assert r.status_code == 202, r.text
+    return r.json()["pending_id"], sent_otps[-1]
+
+
+async def test_audit_code_sent_is_saved(fresh_client, session_factory, fake_redis, userinfo, sent_otps):
+    pending_id, otp = await _fresh_pending(fresh_client, session_factory, fake_redis, userinfo, sent_otps)
+    [e] = await _events(session_factory, "oauth_verification_sent")
+    assert e.event_metadata["provider"] == "google"
+    assert e.event_metadata["email_hash"] == hashlib.sha256(VICTIM.encode()).hexdigest()
+    await _no_secrets(session_factory, pending_id, otp, VICTIM)
+
+
+async def test_audit_wrong_code_is_saved_with_the_attempt_number(fresh_client, session_factory, fake_redis, userinfo, sent_otps):
+    pending_id, otp = await _fresh_pending(fresh_client, session_factory, fake_redis, userinfo, sent_otps)
+    for _ in range(2):
+        assert (await fresh_client.post(VERIFY, json={"pending_id": pending_id, "otp": _wrong(otp)})).status_code == 401
+    events = await _events(session_factory, "oauth_verification_failed")
+    assert sorted(e.event_metadata["attempt"] for e in events) == [1, 2]
+    await _no_secrets(session_factory, pending_id, otp, _wrong(otp))
+
+
+async def test_audit_fifth_failure_is_saved_as_locked(fresh_client, session_factory, fake_redis, userinfo, sent_otps):
+    pending_id, otp = await _fresh_pending(fresh_client, session_factory, fake_redis, userinfo, sent_otps)
+    for _ in range(5):
+        assert (await fresh_client.post(VERIFY, json={"pending_id": pending_id, "otp": _wrong(otp)})).status_code == 401
+    assert len(await _events(session_factory, "oauth_verification_failed")) == 4
+    [locked] = await _events(session_factory, "oauth_verification_locked")
+    assert locked.event_metadata["attempt"] == 5
+    await _no_secrets(session_factory, pending_id, otp)
+
+
+@pytest.mark.parametrize("existing, outcome", [(True, "joined"), (False, "created")])
+async def test_audit_completed_records_joined_or_created(fresh_client, session_factory, fake_redis, userinfo, sent_otps, existing, outcome):
+    pending_id, otp = await _fresh_pending(fresh_client, session_factory, fake_redis, userinfo, sent_otps, existing=existing)
+    r = await fresh_client.post(VERIFY, json={"pending_id": pending_id, "otp": otp})
+    assert r.status_code == 200, r.text
+    [e] = await _events(session_factory, "oauth_verification_completed")
+    assert e.event_metadata["outcome"] == outcome
+    assert e.user_id is not None
+    await _no_secrets(session_factory, pending_id, otp, r.json()["access_token"], r.json()["refresh_token"])

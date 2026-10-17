@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     MICROSOFT_CLIENT_ID: str | None = None
     MICROSOFT_CLIENT_SECRET: str | None = None
     MICROSOFT_REDIRECT_URI: str | None = None
+    ENTRA_REDIRECT_URI: str | None = None  # where Entra External ID returns the browser after sign-in
     OAUTH_PROVIDERS_ENABLED: list[str] = ["google", "microsoft"]
     OAUTH_STATE_TTL_SECONDS: int = 600
 

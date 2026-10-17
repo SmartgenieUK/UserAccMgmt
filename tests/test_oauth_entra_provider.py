@@ -158,3 +158,44 @@ async def test_tampered_or_unverifiable_id_token_is_refused(db_session, entra_pr
     with pytest.raises(AuthError):
         await _sign_in(db_session, entra_provider_settings, monkeypatch, token_data)
     assert await _links(db_session) == []
+
+
+# ---------------------------------------------------------------------------------------------------------
+# CR-208 portal (BRIEF-008 Part 2): the REAL authorize route for entra_external uses ENTRA_REDIRECT_URI, and
+# passes an allow-listed domain_hint (google) through to the provider; any other hint is refused.
+# ---------------------------------------------------------------------------------------------------------
+from urllib.parse import parse_qs, urlparse
+
+from app.main import app as _app
+
+PORTAL_CALLBACK = "https://devgenie.example/portal/callback"
+
+
+@pytest.fixture()
+async def authorize_client(client, rsa_keypair):
+    settings = get_settings().model_copy(
+        update={"ENTRA_TENANT_DOMAIN": "testtenant", "ENTRA_TENANT_ID": TENANT_ID, "ENTRA_CLIENT_ID": CLIENT_ID, "ENTRA_REDIRECT_URI": PORTAL_CALLBACK}
+    )
+    _app.dependency_overrides[get_settings] = lambda: settings
+    yield client
+
+
+async def test_entra_authorize_route_uses_the_configured_redirect(authorize_client):
+    r = await authorize_client.get("/api/v1/oauth/entra_external/authorize")
+    assert r.status_code == 200, r.text
+    q = parse_qs(urlparse(r.json()["authorization_url"]).query)
+    assert q["redirect_uri"] == [PORTAL_CALLBACK]
+    assert "domain_hint" not in q
+    assert r.json()["state"]
+
+
+async def test_entra_authorize_passes_the_google_domain_hint(authorize_client):
+    r = await authorize_client.get("/api/v1/oauth/entra_external/authorize", params={"domain_hint": "google"})
+    assert r.status_code == 200, r.text
+    assert parse_qs(urlparse(r.json()["authorization_url"]).query)["domain_hint"] == ["google"]
+
+
+@pytest.mark.parametrize("hint", ["evil.example", "facebook", ""])
+async def test_entra_authorize_refuses_an_unlisted_domain_hint(authorize_client, hint):
+    r = await authorize_client.get("/api/v1/oauth/entra_external/authorize", params={"domain_hint": hint})
+    assert r.status_code == 422

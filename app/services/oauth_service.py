@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import secrets
@@ -90,7 +91,9 @@ class OAuthService:
         self.redis = redis
         self.state_store = OAuthStateStore(redis, settings)
 
-    async def authorization_url(self, provider_name: str, redirect_uri: str | None) -> tuple[str, str]:
+    async def authorization_url(
+        self, provider_name: str, redirect_uri: str | None, domain_hint: str | None = None
+    ) -> tuple[str, str]:
         provider = self.registry.get_oauth_provider(provider_name)
         redirect = redirect_uri or self._default_redirect(provider_name)
         if not redirect:
@@ -98,7 +101,8 @@ class OAuthService:
         state = secrets.token_urlsafe(16)
         verifier, challenge = generate_pkce_pair()
         await self.state_store.store(state, OAuthState(code_verifier=verifier, redirect_uri=redirect))
-        url = await provider.authorization_url(state=state, redirect_uri=redirect, code_challenge=challenge)
+        hint = {"domain_hint": domain_hint} if domain_hint else {}
+        url = await provider.authorization_url(state=state, redirect_uri=redirect, code_challenge=challenge, **hint)
         return url, state
 
     async def callback(self, provider_name: str, code: str, state: str, redirect_uri: str | None):
@@ -130,11 +134,20 @@ class OAuthService:
         if attempts > MAX_VERIFY_ATTEMPTS or not hmac.compare_digest(otp.encode(), pending["otp"].encode()):
             if attempts >= MAX_VERIFY_ATTEMPTS:
                 await self.redis.delete(key)
+            # Audit the refusal durably BEFORE raising: this path never reaches _sign_in's commit (BRIEF-008).
+            # The attempt number only — never the code, the pending id or the address.
+            action = "oauth_verification_locked" if attempts >= MAX_VERIFY_ATTEMPTS else "oauth_verification_failed"
+            await self.audit_service.log_event(action=action, metadata={"provider": pending["provider"], "attempt": attempts})
+            await self.session.commit()
             raise AuthError("Invalid or expired code", code="otp_invalid")
         if not await self.redis.delete(key):  # a concurrent verify already used it
             raise AuthError("Invalid or expired code", code="otp_invalid")
+        existing = (
+            await self.session.execute(select(User.id).where(User.normalized_email == normalize_email(pending["email"])))
+        ).first()
         return await self._sign_in(
-            pending["provider"], pending["provider_user_id"], pending["email"], pending["display_name"], True, via="email_code"
+            pending["provider"], pending["provider_user_id"], pending["email"], pending["display_name"], True,
+            via="email_code", outcome="joined" if existing else "created",
         )
 
     async def _is_linked(self, provider_name: str, provider_user_id: str) -> bool:
@@ -165,6 +178,12 @@ class OAuthService:
         }
         await self.redis.setex(self._pending_key(pending_id), self.settings.OTP_EXPIRE_MINUTES * 60, json.dumps(pending))
         await self.email_service.send_verification_email(user_info.email, otp)
+        # Durable audit (BRIEF-008): this 202 path never reaches _sign_in's commit. The address is hashed, never stored.
+        await self.audit_service.log_event(
+            action="oauth_verification_sent",
+            metadata={"provider": provider_name, "email_hash": hashlib.sha256(normalize_email(user_info.email).encode()).hexdigest()},
+        )
+        await self.session.commit()
         local, _, domain = user_info.email.partition("@")
         return VerificationRequired(pending_id=pending_id, email_hint=f"{local[:1]}•••@{domain}")
 
@@ -173,7 +192,14 @@ class OAuthService:
         return f"oauth:pending:{pending_id}"
 
     async def _sign_in(
-        self, provider_name: str, provider_user_id: str, email: str, display_name: str | None, email_verified: bool, via: str = "provider"
+        self,
+        provider_name: str,
+        provider_user_id: str,
+        email: str,
+        display_name: str | None,
+        email_verified: bool,
+        via: str = "provider",
+        outcome: str | None = None,
     ):
         user = await IdentityLinkService(self.session).find_or_create_user(
             provider=ExternalProvider(provider_name),
@@ -188,6 +214,12 @@ class OAuthService:
             user_id=str(user.id),
             metadata={"provider": provider_name, "email_verified_by": via},
         )
+        if outcome:  # a code-verified sign-in: did it join an existing account or create one
+            await self.audit_service.log_event(
+                action="oauth_verification_completed",
+                user_id=str(user.id),
+                metadata={"provider": provider_name, "outcome": outcome},
+            )
 
         membership = await self._get_primary_membership(user)
         scopes = resolve_scopes(membership.role)
@@ -219,4 +251,6 @@ class OAuthService:
             return self.settings.GOOGLE_REDIRECT_URI
         if provider_name == "microsoft":
             return self.settings.MICROSOFT_REDIRECT_URI
+        if provider_name == "entra_external":
+            return self.settings.ENTRA_REDIRECT_URI
         return None
