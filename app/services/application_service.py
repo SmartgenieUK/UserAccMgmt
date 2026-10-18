@@ -7,9 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.core.exceptions import NotFoundError, ConflictError, AuthError
+from app.core.exceptions import NotFoundError, ConflictError, AuthError, ValidationError
 from app.models import Application, Organization
 from app.security.hashing import hash_token, verify_token
+from app.security.permissions import PLATFORM_ADMIN
 
 
 class ApplicationService:
@@ -25,7 +26,14 @@ class ApplicationService:
     def _generate_client_secret() -> str:
         return f"cgs_{secrets.token_urlsafe(48)}"
 
+    @staticmethod
+    def _refuse_reserved_scopes(allowed_scopes: list[str] | None) -> None:
+        # platform:admin belongs to named operator users only, never to an application (BUG-06, R7-F1).
+        if allowed_scopes and PLATFORM_ADMIN in allowed_scopes:
+            raise ValidationError(f"{PLATFORM_ADMIN} cannot be granted to an application", code="reserved_scope")
+
     async def create(self, org_id: str, name: str, redirect_uris: list[str], allowed_scopes: list[str]) -> tuple[Application, str]:
+        self._refuse_reserved_scopes(allowed_scopes)
         org = await self.session.get(Organization, org_id)
         if not org:
             raise NotFoundError("Organization not found", code="org_not_found")
@@ -62,6 +70,7 @@ class ApplicationService:
         return app
 
     async def update(self, app_id: str, org_id: str, **kwargs) -> Application:
+        self._refuse_reserved_scopes(kwargs.get("allowed_scopes"))
         app = await self.get(app_id, org_id)
         for key, value in kwargs.items():
             if value is not None:

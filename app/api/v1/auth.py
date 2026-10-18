@@ -307,6 +307,7 @@ async def client_credentials_token(
 ):
     from app.services.application_service import ApplicationService
     from app.security.jwt import create_client_access_token
+    from app.security.permissions import PLATFORM_ADMIN
 
     service = ApplicationService(session, settings)
     app = await service.authenticate_client(data.client_id, data.client_secret)
@@ -316,6 +317,8 @@ async def client_credentials_token(
         granted = [s for s in data.scopes if s in app.allowed_scopes]
     else:
         granted = list(app.allowed_scopes)
+    # A client token is never an operator; strip platform:admin from an app stored before the create-time refusal.
+    granted = [s for s in granted if s != PLATFORM_ADMIN]
 
     token, expires_in = create_client_access_token(
         settings=settings,

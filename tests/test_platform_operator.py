@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 
 import jwt
 import pytest
@@ -16,7 +17,9 @@ from sqlalchemy import select
 from app.api.v1.health import api_help
 from app.core.config import get_settings
 from app.main import app
-from app.models import Membership, Role
+from app.models import Application, Membership, Role
+from app.security.hashing import hash_token
+from app.security.jwt import decode_access_token
 from app.security.permissions import ROLE_SCOPES
 from app.services import oauth_providers
 from app.services.stripe_gateway import StripeGateway, get_stripe_gateway
@@ -254,18 +257,54 @@ async def test_removing_an_operator_takes_effect_on_their_existing_token(client,
     assert await _platform_routes(client, operator, customer) == [403, 403, 403]
 
 
-async def test_an_org_app_cannot_mint_platform_admin(client, sent_otps, env):
-    """An org admin registers an application allowed `platform:admin`; its client token still gets 403."""
+async def test_an_app_cannot_be_created_or_updated_with_platform_admin(client, db_session, sent_otps, env):
+    """An org admin cannot store `platform:admin` on an application, at create or at update (R7-F1)."""
     user = await _password_signup(client, sent_otps, "ivy@org1.example")
+    apps = f"/api/v1/orgs/{user['org_id']}/apps"
     created = await client.post(
-        f"/api/v1/orgs/{user['org_id']}/apps",
-        json={"name": "sneaky", "allowed_scopes": ["platform:admin", "admin:users:read", "admin:users:write", "billing:write"]},
-        headers=user["headers"],
+        apps, json={"name": "sneaky", "allowed_scopes": ["platform:admin", "billing:write"]}, headers=user["headers"]
     )
-    assert created.status_code in (200, 201), created.text
-    body = created.json()
-    token = await client.post("/api/v1/auth/token", json={"client_id": body["client_id"], "client_secret": body["client_secret"]})
+    assert created.status_code == 422, created.text
+    assert created.json()["error"]["code"] == "reserved_scope"
+    stored = (await db_session.execute(select(Application).where(Application.org_id == user["org_id"]))).scalars().all()
+    assert stored == []
+
+    plain = await client.post(apps, json={"name": "plain", "allowed_scopes": ["billing:write"]}, headers=user["headers"])
+    assert plain.status_code == 201, plain.text
+    patched = await client.patch(
+        f"{apps}/{plain.json()['id']}", json={"allowed_scopes": ["platform:admin"]}, headers=user["headers"]
+    )
+    assert patched.status_code == 422, patched.text
+    assert patched.json()["error"]["code"] == "reserved_scope"
+    after = await client.get(f"{apps}/{plain.json()['id']}", headers=user["headers"])
+    assert after.json()["allowed_scopes"] == ["billing:write"]
+
+
+@pytest.mark.parametrize("requested", [["platform:admin", "billing:write"], None], ids=["explicit", "default"])
+async def test_a_stored_platform_admin_app_mints_no_platform_admin_token(client, db_session, sent_otps, env, requested):
+    """An application stored with `platform:admin` before the create-time refusal still never gets it in a token."""
+    user = await _password_signup(client, sent_otps, "jo@org1.example")
+    secret = "cgs_bug06-legacy"
+    db_session.add(
+        Application(
+            org_id=uuid.UUID(user["org_id"]),
+            name="legacy",
+            client_id="cg_bug06-legacy",
+            secret_hash=hash_token(secret),
+            redirect_uris=[],
+            allowed_scopes=["platform:admin", "billing:write"],
+        )
+    )
+    await db_session.flush()
+    body = {"client_id": "cg_bug06-legacy", "client_secret": secret}
+    if requested is not None:
+        body["scopes"] = requested
+    token = await client.post("/api/v1/auth/token", json=body)
     assert token.status_code == 200, token.text
+    assert token.json()["scopes"] == ["billing:write"]
+    claims = decode_access_token(get_settings(), token.json()["access_token"])
+    assert claims["token_type"] == "client"
+    assert claims["scopes"] == ["billing:write"]
     app_caller = {"headers": {"Authorization": f"Bearer {token.json()['access_token']}"}}
     assert await _platform_routes(client, app_caller, user) == [403, 403, 403]
 
