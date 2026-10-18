@@ -5,6 +5,8 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
+from app.core.config import get_settings
+from app.main import app
 from app.models import Membership, Plan, Role, Subscription
 from app.utils.time import utcnow
 
@@ -33,6 +35,18 @@ async def admin(client, sent_otps):
     return await _signup(client, sent_otps, "admin@example.com")
 
 
+@pytest.fixture()
+async def operator(client, sent_otps):
+    """A platform operator (PLATFORM_OPERATOR_USER_IDS): since BUG-06 only an operator sets a plan manually."""
+    user = await _signup(client, sent_otps, "ops@platform.example")
+    settings = get_settings().model_copy(update={"PLATFORM_OPERATOR_USER_IDS": [user["user_id"]]})
+    app.dependency_overrides[get_settings] = lambda: settings
+    login = await client.post("/api/v1/login", json={"email": "ops@platform.example", "password": PASSWORD})
+    user["headers"] = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    yield user
+    app.dependency_overrides.pop(get_settings, None)
+
+
 async def _add_member(client, db_session, sent_otps, org_id: str, email: str) -> dict:
     """A second user who is a MEMBER of the admin's org; token scoped to that org."""
     user = await _signup(client, sent_otps, email)
@@ -59,9 +73,9 @@ async def test_unknown_product_is_rejected(client, admin):
     assert res.json()["error"]["code"] == "unknown_plan"
 
 
-async def test_admin_override_sets_tier_and_is_audited(client, db_session, admin):
+async def test_operator_override_sets_tier_and_is_audited(client, db_session, admin, operator):
     url = f"/api/v1/orgs/{admin['org_id']}/entitlements/{PRODUCT}"
-    res = await client.put(url, json={"tier": "pro", "seats": 2}, headers=admin["headers"])
+    res = await client.put(url, json={"tier": "pro", "seats": 2}, headers=operator["headers"])
     assert res.status_code == 200, res.text
     assert res.json()["tier"] == "pro" and res.json()["seats"] == 2 and res.json()["source"] == "manual"
 
@@ -69,7 +83,7 @@ async def test_admin_override_sets_tier_and_is_audited(client, db_session, admin
     assert me.json()["tier"] == "pro" and me.json()["status"] == "active"
 
     # Re-override replaces, never duplicates (unique org × product).
-    again = await client.put(url, json={"tier": "enterprise"}, headers=admin["headers"])
+    again = await client.put(url, json={"tier": "enterprise"}, headers=operator["headers"])
     assert again.json()["tier"] == "enterprise" and again.json()["seats"] is None
     subs = (await db_session.execute(select(Subscription).where(Subscription.org_id == admin["org_id"]))).scalars().all()
     assert len(subs) == 1
@@ -97,10 +111,10 @@ async def test_admin_of_another_org_cannot_override(client, sent_otps, admin):
     assert res.status_code == 403
 
 
-async def test_seat_cap_is_enforced(client, db_session, sent_otps, admin):
+async def test_seat_cap_is_enforced(client, db_session, sent_otps, admin, operator):
     member = await _add_member(client, db_session, sent_otps, admin["org_id"], "member@example.com")
     base = f"/api/v1/orgs/{admin['org_id']}/entitlements/{PRODUCT}"
-    assert (await client.put(base, json={"tier": "pro", "seats": 1}, headers=admin["headers"])).status_code == 200
+    assert (await client.put(base, json={"tier": "pro", "seats": 1}, headers=operator["headers"])).status_code == 200
 
     first = await client.post(f"{base}/seats", json={"user_id": admin["user_id"]}, headers=admin["headers"])
     assert first.status_code == 200 and first.json()["seats_used"] == 1
@@ -119,9 +133,9 @@ async def test_seat_cap_is_enforced(client, db_session, sent_otps, admin):
 
 
 @pytest.mark.parametrize("status,period_end", [("past_due", None), ("cancelled", None), ("active", -1)])
-async def test_lapsed_subscription_falls_back_to_lite(client, db_session, admin, status, period_end):
+async def test_lapsed_subscription_falls_back_to_lite(client, db_session, admin, operator, status, period_end):
     base = f"/api/v1/orgs/{admin['org_id']}/entitlements/{PRODUCT}"
-    assert (await client.put(base, json={"tier": "pro"}, headers=admin["headers"])).status_code == 200
+    assert (await client.put(base, json={"tier": "pro"}, headers=operator["headers"])).status_code == 200
 
     sub = (await db_session.execute(select(Subscription).where(Subscription.org_id == admin["org_id"]))).scalar_one()
     sub.status = status
@@ -133,10 +147,10 @@ async def test_lapsed_subscription_falls_back_to_lite(client, db_session, admin,
     assert me.json()["tier"] == "lite" and me.json()["status"] == status
 
 
-async def test_deactivated_plan_falls_back_to_lite(client, db_session, admin):
+async def test_deactivated_plan_falls_back_to_lite(client, db_session, admin, operator):
     """A withdrawn plan (is_active=False) must not keep serving its paid tier (review finding)."""
     base = f"/api/v1/orgs/{admin['org_id']}/entitlements/{PRODUCT}"
-    assert (await client.put(base, json={"tier": "pro"}, headers=admin["headers"])).status_code == 200
+    assert (await client.put(base, json={"tier": "pro"}, headers=operator["headers"])).status_code == 200
 
     sub = (await db_session.execute(select(Subscription).where(Subscription.org_id == admin["org_id"]))).scalar_one()
     plan = await db_session.get(Plan, sub.plan_id)

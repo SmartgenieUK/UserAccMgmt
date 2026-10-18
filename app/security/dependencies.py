@@ -11,7 +11,7 @@ from app.db.session import get_session
 from app.models import User, Membership, Organization, Role
 from app.schemas.token import TokenPayload
 from app.security.jwt import decode_access_token
-from app.security.permissions import resolve_scopes
+from app.security.permissions import PLATFORM_ADMIN, resolve_scopes
 from app.utils.context import org_id_ctx
 
 bearer = HTTPBearer(auto_error=False)
@@ -77,6 +77,24 @@ def require_scopes(required: list[str]):
         for scope in required:
             if scope not in payload.scopes:
                 raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return payload
+
+    return _dependency
+
+
+def require_platform_operator():
+    """platform:admin in the token AND the subject still in PLATFORM_OPERATOR_USER_IDS (BUG-06).
+
+    The list check means a client-credentials token an org admin minted with platform:admin is refused, and
+    removing an operator takes effect on tokens already issued.
+    """
+
+    async def _dependency(
+        payload: TokenPayload = Depends(require_scopes([PLATFORM_ADMIN])),
+        settings: Settings = Depends(get_settings),
+    ) -> TokenPayload:
+        if payload.sub not in settings.PLATFORM_OPERATOR_USER_IDS:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
         return payload
 
     return _dependency

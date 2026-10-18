@@ -11,6 +11,7 @@ from app.core.exceptions import AuthError
 from app.models import RefreshToken
 from app.security.hashing import hash_token, verify_token
 from app.security.jwt import create_access_token
+from app.security.permissions import PLATFORM_ADMIN
 from app.utils.security import generate_token_secret, split_token
 from app.utils.time import utcnow
 
@@ -21,6 +22,9 @@ class TokenService:
         self.settings = settings
 
     async def create_access_token(self, user_id: str, email: str, role: str, org_id: str, scopes: list[str]):
+        scopes = [s for s in scopes if s != PLATFORM_ADMIN]
+        if str(user_id) in self.settings.PLATFORM_OPERATOR_USER_IDS:
+            scopes.append(PLATFORM_ADMIN)
         token, expires_in = create_access_token(
             settings=self.settings,
             subject=str(user_id),

@@ -107,6 +107,8 @@ class Settings(BaseSettings):
     PASSWORD_REQUIRE_SPECIAL: bool = True
 
     ALLOWED_EMAIL_DOMAINS: list[str] = []
+    # User ids that get platform:admin (cross-organisation admin). Empty = nobody (BUG-06).
+    PLATFORM_OPERATOR_USER_IDS: list[str] = []
 
     AUDIT_LOG_ENABLED: bool = True
     METRICS_ENABLED: bool = True
@@ -121,6 +123,7 @@ class Settings(BaseSettings):
         "ALLOWED_ORIGINS",
         "OAUTH_PROVIDERS_ENABLED",
         "ALLOWED_EMAIL_DOMAINS",
+        "PLATFORM_OPERATOR_USER_IDS",
         "PLUGIN_MODULES",
         "HOOK_MODULES",
         mode="before",

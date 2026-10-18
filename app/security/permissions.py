@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from app.models.enums import Role
 
+# Held by no role: added to a user's token only when their id is in PLATFORM_OPERATOR_USER_IDS (BUG-06).
+PLATFORM_ADMIN = "platform:admin"
+
 ROLE_SCOPES: dict[Role, list[str]] = {
     Role.ADMIN: [
         "profile:read",
@@ -13,8 +16,6 @@ ROLE_SCOPES: dict[Role, list[str]] = {
         "users:write",
         "apps:read",
         "apps:write",
-        "admin:users:read",
-        "admin:users:write",
         "entitlements:read",
         "billing:write",
     ],

@@ -8,7 +8,7 @@ from app.db.session import get_session
 from app.models import User
 from app.schemas.admin import AdminUserRead, AdminDisableRequest
 from app.schemas.common import MessageResponse
-from app.security.dependencies import require_scopes
+from app.security.dependencies import require_platform_operator
 
 router = APIRouter()
 
@@ -16,7 +16,7 @@ router = APIRouter()
 @router.get("/admin/users", response_model=list[AdminUserRead])
 async def list_users(
     session: AsyncSession = Depends(get_session),
-    _=Depends(require_scopes(["admin:users:read"])),
+    _=Depends(require_platform_operator()),
 ):
     result = await session.execute(select(User))
     return list(result.scalars().all())
@@ -27,7 +27,7 @@ async def disable_user(
     user_id: str,
     data: AdminDisableRequest,
     session: AsyncSession = Depends(get_session),
-    _=Depends(require_scopes(["admin:users:write"])),
+    _=Depends(require_platform_operator()),
 ):
     user = await session.get(User, user_id)
     if user:

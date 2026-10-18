@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.session import get_session
+from app.security.permissions import PLATFORM_ADMIN, ROLE_SCOPES
 
 router = APIRouter()
 
@@ -239,15 +240,22 @@ async def api_help(settings=Depends(get_settings)):
                 {
                     "method": "GET",
                     "path": f"{base}/admin/users",
-                    "description": "List all users in the system",
-                    "scopes": ["admin:users:read"],
+                    "description": "List all users in the system (platform operator only)",
+                    "scopes": [PLATFORM_ADMIN],
                 },
                 {
                     "method": "PATCH",
                     "path": f"{base}/admin/users/{{user_id}}/disable",
-                    "description": "Enable or disable a user account",
-                    "scopes": ["admin:users:write"],
-                    "body": {"disabled": "bool"},
+                    "description": "Enable or disable a user account (platform operator only)",
+                    "scopes": [PLATFORM_ADMIN],
+                    "body": {"disable": "bool"},
+                },
+                {
+                    "method": "PUT",
+                    "path": f"{base}/orgs/{{org_id}}/entitlements/{{product}}",
+                    "description": "Set an organization's plan manually (platform operator only)",
+                    "scopes": [PLATFORM_ADMIN],
+                    "body": {"tier": "string", "seats": "int|null", "expires_at": "datetime|null"},
                 },
             ],
         },
@@ -261,16 +269,11 @@ async def api_help(settings=Depends(get_settings)):
             "users:write": "Manage organization members",
             "apps:read": "List applications",
             "apps:write": "Manage applications",
-            "admin:users:read": "List all users (admin)",
-            "admin:users:write": "Enable/disable users (admin)",
             "entitlements:read": "Read the org's entitlement for a product",
-            "billing:write": "Set manual entitlements and assign seats (admin)",
+            "billing:write": "Stripe checkout, billing portal and seats for your own organization (admin)",
+            PLATFORM_ADMIN: "Cross-organization admin: list/disable users, set plans (PLATFORM_OPERATOR_USER_IDS only; no role)",
         },
-        "roles": {
-            "admin": ["profile:read", "profile:write", "orgs:read", "orgs:write", "invitations:write", "users:read", "users:write", "apps:read", "apps:write", "admin:users:read", "admin:users:write", "entitlements:read", "billing:write"],
-            "member": ["profile:read", "profile:write", "orgs:read", "users:read", "apps:read", "entitlements:read"],
-            "readonly": ["profile:read", "orgs:read", "users:read", "apps:read", "entitlements:read"],
-        },
+        "roles": {role.value: scopes for role, scopes in ROLE_SCOPES.items()},
         "password_policy": {
             "min_length": settings.PASSWORD_MIN_LENGTH,
             "max_length": settings.PASSWORD_MAX_LENGTH,
