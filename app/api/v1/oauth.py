@@ -18,8 +18,9 @@ from app.services.oauth_providers import GoogleProvider, MicrosoftProvider, Entr
 
 router = APIRouter()
 
-# Standard OAuth `domain_hint` values the authorize route passes through (Entra: skip to that federated IdP).
-ALLOWED_DOMAIN_HINTS = {"google"}
+# The `domain_hint` values the authorize route accepts, and what each sends the provider (Entra: skip to that
+# federated IdP). Entra External ID names its Google federation `google.com`; a bare `google` is AADSTS90023.
+ALLOWED_DOMAIN_HINTS = {"google": "google.com"}
 
 
 @router.get("/oauth/{provider}/authorize", response_model=OAuthAuthorizeResponse)
@@ -46,7 +47,7 @@ async def oauth_authorize(
     )
     if domain_hint is not None and domain_hint not in ALLOWED_DOMAIN_HINTS:
         raise ValidationError("domain_hint not allowed", code="domain_hint_not_allowed")
-    url, state = await service.authorization_url(provider, None, domain_hint)
+    url, state = await service.authorization_url(provider, None, ALLOWED_DOMAIN_HINTS.get(domain_hint))
     return OAuthAuthorizeResponse(authorization_url=url, state=state)
 
 

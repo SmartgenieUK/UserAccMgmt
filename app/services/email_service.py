@@ -48,8 +48,9 @@ class EmailService:
         }
         if html_body:
             message["content"]["html"] = html_body
-        poller = client.begin_send(message)
-        poller.result()
+        # Return once ACS has accepted the message (begin_send raises if it does not). Waiting for delivery
+        # held the sign-up callback ~21 s, past the portal's 3 s deadline (BRIEF-018).
+        client.begin_send(message, polling=False)
 
     async def _send_via_smtp(self, to_email: str, subject: str, text_body: str, html_body: str | None = None) -> None:
         message = EmailMessage()

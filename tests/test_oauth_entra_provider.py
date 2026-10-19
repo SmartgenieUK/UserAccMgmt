@@ -189,13 +189,15 @@ async def test_entra_authorize_route_uses_the_configured_redirect(authorize_clie
     assert r.json()["state"]
 
 
-async def test_entra_authorize_passes_the_google_domain_hint(authorize_client):
+async def test_entra_authorize_sends_entra_the_google_domain_hint(authorize_client):
+    # The portal sends `google`; Entra External ID names its Google federation `google.com` and answers a bare
+    # `google` with AADSTS90023 (BRIEF-018 item 2, the owner's first live sign-up).
     r = await authorize_client.get("/api/v1/oauth/entra_external/authorize", params={"domain_hint": "google"})
     assert r.status_code == 200, r.text
-    assert parse_qs(urlparse(r.json()["authorization_url"]).query)["domain_hint"] == ["google"]
+    assert parse_qs(urlparse(r.json()["authorization_url"]).query)["domain_hint"] == ["google.com"]
 
 
-@pytest.mark.parametrize("hint", ["evil.example", "facebook", ""])
+@pytest.mark.parametrize("hint", ["evil.example", "facebook", "", "google.com"])
 async def test_entra_authorize_refuses_an_unlisted_domain_hint(authorize_client, hint):
     r = await authorize_client.get("/api/v1/oauth/entra_external/authorize", params={"domain_hint": hint})
     assert r.status_code == 422
