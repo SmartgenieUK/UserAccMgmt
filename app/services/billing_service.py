@@ -19,18 +19,18 @@ class BillingService:
         self.audit_service = audit_service
         self.gateway = gateway
 
-    async def ensure_customer(self, org: Organization) -> str:
+    async def ensure_customer(self, org: Organization, email: str) -> str:
         if org.stripe_customer_id is None:
             metadata = {"org_id": str(org.id)}
-            org.stripe_customer_id = self.gateway.create_customer(name=org.name, metadata=metadata)
+            org.stripe_customer_id = self.gateway.create_customer(name=org.name, email=email, metadata=metadata)
             await self.session.flush()
         return org.stripe_customer_id
 
-    async def create_checkout_session(self, org: Organization, price_id: str, actor_user_id: str) -> str:
+    async def create_checkout_session(self, org: Organization, price_id: str, actor_user_id: str, actor_email: str) -> str:
         if price_id not in self.settings.STRIPE_PRICE_MAP:
             raise ValidationError("Unknown price id", code="unknown_price")
         
-        customer_id = await self.ensure_customer(org)
+        customer_id = await self.ensure_customer(org, actor_email)
         metadata = {"org_id": str(org.id), "price_id": price_id}
         
         url = self.gateway.create_checkout_session(

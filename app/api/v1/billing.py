@@ -53,7 +53,7 @@ async def create_checkout_session(
 ):
     _require_org(membership, org_id, admin=True)
     org = await session.get(Organization, uuid.UUID(org_id))
-    url = await service.create_checkout_session(org, data.price_id, str(current_user.id))
+    url = await service.create_checkout_session(org, data.price_id, str(current_user.id), current_user.email)
     await session.commit()
     return UrlResponse(url=url)
 

@@ -32,7 +32,7 @@ CLIENT_ID = "client-bug06"
 
 
 class FakeStripeGateway(StripeGateway):
-    def create_customer(self, name: str, metadata: dict) -> str:
+    def create_customer(self, name: str, email: str, metadata: dict) -> str:
         return "cus_bug06"
 
     def create_checkout_session(self, customer_id, price_id, success_url, cancel_url, metadata) -> str:

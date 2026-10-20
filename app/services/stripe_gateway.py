@@ -11,8 +11,9 @@ class StripeGateway:
         self.settings = settings
         stripe.api_key = settings.STRIPE_API_KEY
 
-    def create_customer(self, name: str, metadata: dict) -> str:
-        customer = stripe.Customer.create(name=name, metadata=metadata)
+    def create_customer(self, name: str, email: str, metadata: dict) -> str:
+        # The email is where Stripe sends receipts and invoices (BRIEF-019).
+        customer = stripe.Customer.create(name=name, email=email, metadata=metadata)
         return customer.id
 
     def create_checkout_session(
@@ -26,6 +27,9 @@ class StripeGateway:
             cancel_url=cancel_url,
             subscription_data={"metadata": metadata},
             metadata=metadata,
+            # Stripe's promotion-code box; codes and their rules live in the Stripe dashboard (BRIEF-019). No
+            # payment_method_collection: a card is collected even on a 100%-off code.
+            allow_promotion_codes=True,
         )
         return session.url
 

@@ -50,8 +50,8 @@ class FakeStripeGateway(StripeGateway):
         super().__init__(settings)
         self.calls = []
 
-    def create_customer(self, name: str, metadata: dict) -> str:
-        self.calls.append(("create_customer", name, metadata))
+    def create_customer(self, name: str, email: str, metadata: dict) -> str:
+        self.calls.append(("create_customer", name, email, metadata))
         return "cus_test123"
 
     def create_checkout_session(self, customer_id: str, price_id: str, success_url: str, cancel_url: str, metadata: dict) -> str:
@@ -487,3 +487,53 @@ async def test_billing_webhook_writes_audit_event(client, db_session, admin, bil
     assert len(upd_events) == 1
     assert upd_events[0].event_metadata["stripe_subscription_id"] == "sub_upd4"
     assert upd_events[0].event_metadata["status"] == "active"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# BRIEF-019: the REAL StripeGateway, with only the Stripe library calls stubbed. The fake gateway above
+# replaces the class, so it cannot prove what is sent to Stripe.
+# ---------------------------------------------------------------------------------------------------------
+import types as _types
+
+import stripe as _stripe
+
+
+def _capture(monkeypatch, target, attr, result):
+    seen = {}
+
+    def create(**kwargs):
+        seen.update(kwargs)
+        return result
+
+    monkeypatch.setattr(target, attr, create)
+    return seen
+
+
+def test_checkout_session_offers_promotion_codes_and_always_collects_a_card(monkeypatch):
+    seen = _capture(monkeypatch, _stripe.checkout.Session, "create", _types.SimpleNamespace(url="https://checkout.stripe.test/s"))
+    url = StripeGateway(get_settings()).create_checkout_session(
+        customer_id="cus_1", price_id="price_pro", success_url="http://s", cancel_url="http://c", metadata={"org_id": "o"}
+    )
+    assert url == "https://checkout.stripe.test/s"
+    assert seen["allow_promotion_codes"] is True
+    assert "payment_method_collection" not in seen  # Stripe's default: a card even on a 100%-off code
+
+
+def test_a_new_stripe_customer_carries_the_buyers_email(monkeypatch):
+    seen = _capture(monkeypatch, _stripe.Customer, "create", _types.SimpleNamespace(id="cus_new"))
+    cid = StripeGateway(get_settings()).create_customer(name="Acme", email="buyer@example.com", metadata={"org_id": "o"})
+    assert cid == "cus_new"
+    assert seen == {"name": "Acme", "email": "buyer@example.com", "metadata": {"org_id": "o"}}
+
+
+@pytest.mark.asyncio
+async def test_checkout_creates_the_customer_with_the_admins_email_once(client, db_session, admin, billing_settings):
+    gateway = FakeStripeGateway(get_settings())
+    app.dependency_overrides[get_stripe_gateway] = lambda: gateway
+    path = f"/api/v1/orgs/{admin['org_id']}/billing/checkout-session"
+    for _ in range(2):
+        res = await client.post(path, headers=admin["headers"], json={"price_id": "price_pro"})
+        assert res.status_code == 200, res.text
+    created = [c for c in gateway.calls if c[0] == "create_customer"]
+    assert len(created) == 1  # an existing customer is left as it is
+    assert created[0][2] == "admin@example.com"
