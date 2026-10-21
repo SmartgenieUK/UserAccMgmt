@@ -17,6 +17,7 @@ class EntitlementRead(APIModel):
     expires_at: datetime | None
     status: str
     source: str | None
+    cancel_at_period_end: bool
 
 
 class EntitlementOverride(APIModel):

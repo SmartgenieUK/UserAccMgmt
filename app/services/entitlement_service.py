@@ -28,6 +28,7 @@ class Entitlement:
     expires_at: datetime | None
     status: str  # subscription status, or "none" when the org has no subscription for the product
     source: str | None
+    cancel_at_period_end: bool  # a pending cancellation: still entitled until expires_at (BRIEF-029)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -64,6 +65,7 @@ class EntitlementService:
             expires_at=subscription.current_period_end if subscription and plan is subscription.plan else None,
             status=subscription.status if subscription else "none",
             source=subscription.source if subscription else None,
+            cancel_at_period_end=bool(subscription and plan is subscription.plan and subscription.cancel_at_period_end),
         )
 
     async def override(

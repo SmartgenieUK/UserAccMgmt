@@ -49,19 +49,32 @@ class BillingService:
         )
         return url
 
-    async def create_portal_session(self, org: Organization, actor_user_id: str) -> str:
+    async def create_portal_session(self, org: Organization, actor_user_id: str, flow: str | None = None) -> str:
         if not org.stripe_customer_id:
             raise ValidationError("Organization has no stripe customer", code="no_customer")
-        
+
+        cancel_subscription_id = None
+        if flow == "cancel":
+            result = await self.session.execute(
+                select(Subscription.stripe_subscription_id).where(
+                    Subscription.org_id == org.id, Subscription.stripe_subscription_id.is_not(None)
+                )
+            )
+            cancel_subscription_id = result.scalars().first()
+            if not cancel_subscription_id:
+                raise ValidationError("Organization has no subscription to cancel", code="no_subscription")
+
         url = self.gateway.create_portal_session(
             customer_id=org.stripe_customer_id,
-            return_url=self.settings.STRIPE_PORTAL_RETURN_URL
+            return_url=self.settings.STRIPE_PORTAL_RETURN_URL,
+            cancel_subscription_id=cancel_subscription_id,
         )
-        
+
         await self.audit_service.log_event(
             action="billing_portal_opened",
             user_id=actor_user_id,
-            org_id=str(org.id)
+            org_id=str(org.id),
+            metadata={"flow": flow} if flow else None,
         )
         return url
 
@@ -77,7 +90,8 @@ class BillingService:
                 "tier": (await self.session.get(Plan, sub.plan_id)).code,
                 "status": sub.status,
                 "source": sub.source,
-                "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None
+                "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+                "cancel_at_period_end": sub.cancel_at_period_end,
             }
             for sub in subscriptions
         ]
@@ -211,15 +225,16 @@ class BillingService:
         if stripe_status in status_map:
             subscription.status = status_map[stripe_status]
 
-        # Note: current_period_end comes as a unix timestamp in stripe
-        # wait, the spec says update current_period_end; we can do this if present in data_object.
+        # Since Stripe's 2025 API versions the period end lives on the subscription items; older versions put it on
+        # the subscription. Every renewal sends this event, so a stored value is always refreshed (BRIEF-029).
         from datetime import datetime, timezone
-        period_end = data_object.get("current_period_end")
+        items = data_object.get("items", {}).get("data", [])
+        period_end = (items[0].get("current_period_end") if items else None) or data_object.get("current_period_end")
         if period_end:
             subscription.current_period_end = datetime.fromtimestamp(period_end, tz=timezone.utc)
+        subscription.cancel_at_period_end = bool(data_object.get("cancel_at_period_end"))
 
         # Check if price changed
-        items = data_object.get("items", {}).get("data", [])
         if items:
             price_id = items[0].get("price", {}).get("id")
             if price_id and price_id in self.settings.STRIPE_PRICE_MAP:

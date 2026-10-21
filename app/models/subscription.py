@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, Integer, ForeignKey, func, UniqueConstraint, Index
+from sqlalchemy import Boolean, String, Integer, ForeignKey, func, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -24,6 +24,8 @@ class Subscription(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     seats: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None = unlimited
     current_period_end: Mapped = mapped_column(TZ_DATETIME, nullable=True)
+    # Stripe's "cancel at end of billing period": still entitled until current_period_end (BRIEF-029).
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     stripe_customer_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     stripe_subscription_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

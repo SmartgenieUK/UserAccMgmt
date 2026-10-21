@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Literal
+
 from pydantic import BaseModel
 
 from app.core.config import get_settings, Settings
@@ -20,6 +22,10 @@ router = APIRouter()
 
 class CheckoutSessionRequest(BaseModel):
     price_id: str
+
+
+class PortalSessionRequest(BaseModel):
+    flow: Literal["cancel"] | None = None  # "cancel" opens Stripe's portal at the cancel confirmation
 
 
 class UrlResponse(BaseModel):
@@ -61,6 +67,7 @@ async def create_checkout_session(
 @router.post("/orgs/{org_id}/billing/portal-session", response_model=UrlResponse)
 async def create_portal_session(
     org_id: str,
+    data: PortalSessionRequest | None = None,
     current_user=Depends(get_current_user),
     membership=Depends(get_current_membership),
     session: AsyncSession = Depends(get_session),
@@ -69,7 +76,7 @@ async def create_portal_session(
 ):
     _require_org(membership, org_id, admin=True)
     org = await session.get(Organization, uuid.UUID(org_id))
-    url = await service.create_portal_session(org, str(current_user.id))
+    url = await service.create_portal_session(org, str(current_user.id), flow=data.flow if data else None)
     await session.commit()
     return UrlResponse(url=url)
 

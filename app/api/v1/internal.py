@@ -68,6 +68,7 @@ async def entitlement_by_subject(
         "tier": entitlement.tier,
         "status": entitlement.status,
         "expires_at": entitlement.expires_at.isoformat() if entitlement.expires_at else None,
+        "cancel_at_period_end": entitlement.cancel_at_period_end,
         "org_id": str(membership.org_id),
         "account_id": str(user.id),
     }

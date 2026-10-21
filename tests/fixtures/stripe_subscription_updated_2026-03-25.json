@@ -1,0 +1,39 @@
+{
+  "id": "evt_fixture_sub_updated",
+  "object": "event",
+  "api_version": "2026-03-25.dahlia",
+  "type": "customer.subscription.updated",
+  "data": {
+    "object": {
+      "id": "sub_fixture",
+      "object": "subscription",
+      "customer": "cus_test123",
+      "status": "active",
+      "cancel_at": 1795219200,
+      "cancel_at_period_end": true,
+      "canceled_at": 1792627200,
+      "cancellation_details": {"comment": null, "feedback": null, "reason": "cancellation_requested"},
+      "collection_method": "charge_automatically",
+      "created": 1792627200,
+      "currency": "gbp",
+      "livemode": false,
+      "metadata": {"org_id": "set-by-the-test", "price_id": "price_pro"},
+      "items": {
+        "object": "list",
+        "data": [
+          {
+            "id": "si_fixture",
+            "object": "subscription_item",
+            "current_period_start": 1792627200,
+            "current_period_end": 1795219200,
+            "price": {"id": "price_pro", "object": "price", "recurring": {"interval": "month", "interval_count": 1}},
+            "quantity": 1,
+            "subscription": "sub_fixture"
+          }
+        ],
+        "has_more": false
+      }
+    },
+    "previous_attributes": {"cancel_at": null, "cancel_at_period_end": false, "canceled_at": null}
+  }
+}

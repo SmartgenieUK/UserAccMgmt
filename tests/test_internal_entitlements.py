@@ -92,12 +92,24 @@ async def test_active_pro_subscription_resolves_for_the_linked_person(svc, db_se
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body) == {"tier", "status", "expires_at", "org_id", "account_id"}
+    assert set(body) == {"tier", "status", "expires_at", "cancel_at_period_end", "org_id", "account_id"}
     assert body["tier"] == "pro"
     assert body["status"] == "active"
     assert body["org_id"] == str(primary.id)
     assert body["account_id"] == str(user.id)  # the person, not the org
     assert body["expires_at"] is not None
+    assert body["cancel_at_period_end"] is False
+
+
+async def test_a_pending_cancellation_is_returned_with_the_period_end(svc, db_session):
+    # BRIEF-029: core reads this to say "Pro — ends 21 November 2026".
+    _, primary, _ = await _linked_user(db_session)
+    await _subscribe(db_session, primary, period_end=utcnow() + timedelta(days=30))
+    sub = (await db_session.execute(select(Subscription).where(Subscription.org_id == primary.id))).scalar_one()
+    sub.cancel_at_period_end = True
+    await db_session.commit()
+    body = (await svc.get(ENDPOINT, params=_params(), headers={"X-Service-Secret": SECRET})).json()
+    assert body["tier"] == "pro" and body["cancel_at_period_end"] is True and body["expires_at"] is not None
 
 
 async def test_trialing_counts_as_entitled(svc, db_session):

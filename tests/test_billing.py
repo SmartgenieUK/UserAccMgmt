@@ -58,8 +58,8 @@ class FakeStripeGateway(StripeGateway):
         self.calls.append(("create_checkout_session", customer_id, price_id, metadata))
         return "https://checkout.stripe.test/session"
 
-    def create_portal_session(self, customer_id: str, return_url: str) -> str:
-        self.calls.append(("create_portal_session", customer_id))
+    def create_portal_session(self, customer_id: str, return_url: str, cancel_subscription_id: str | None = None) -> str:
+        self.calls.append(("create_portal_session", customer_id, cancel_subscription_id))
         return "https://portal.stripe.test/session"
 
     def construct_event(self, payload: bytes, sig_header: str) -> dict:

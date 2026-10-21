@@ -85,7 +85,9 @@ class Settings(BaseSettings):
 
     STRIPE_API_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
-    STRIPE_PRICE_MAP: dict[str, str] = {}
+    # `| str` lets the documented priceId=product:tier env form reach _parse_price_map: pydantic-settings 2.3.4
+    # JSON-decodes a plain dict field first and start-up fails on it (BRIEF-029). The validator returns a dict.
+    STRIPE_PRICE_MAP: dict[str, str] | str = {}
     STRIPE_CHECKOUT_SUCCESS_URL: str = ""
     STRIPE_CHECKOUT_CANCEL_URL: str = ""
     STRIPE_PORTAL_RETURN_URL: str = ""

@@ -33,11 +33,16 @@ class StripeGateway:
         )
         return session.url
 
-    def create_portal_session(self, customer_id: str, return_url: str) -> str:
-        session = stripe.billing_portal.Session.create(
-            customer=customer_id,
-            return_url=return_url,
-        )
+    def create_portal_session(self, customer_id: str, return_url: str, cancel_subscription_id: str | None = None) -> str:
+        params = {"customer": customer_id, "return_url": return_url}
+        if cancel_subscription_id:
+            # Straight to Stripe's cancel confirmation, then back to the same page (BRIEF-029).
+            params["flow_data"] = {
+                "type": "subscription_cancel",
+                "subscription_cancel": {"subscription": cancel_subscription_id},
+                "after_completion": {"type": "redirect", "redirect": {"return_url": return_url}},
+            }
+        session = stripe.billing_portal.Session.create(**params)
         return session.url
 
     def construct_event(self, payload: bytes, sig_header: str) -> dict:

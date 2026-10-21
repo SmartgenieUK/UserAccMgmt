@@ -38,7 +38,7 @@ class FakeStripeGateway(StripeGateway):
     def create_checkout_session(self, customer_id, price_id, success_url, cancel_url, metadata) -> str:
         return "https://checkout.stripe.test/session"
 
-    def create_portal_session(self, customer_id, return_url) -> str:
+    def create_portal_session(self, customer_id, return_url, cancel_subscription_id=None) -> str:
         return "https://portal.stripe.test/session"
 
 
