@@ -161,6 +161,7 @@ async def test_webhook_checkout_completed_activates_subscription(client, db_sess
             "object": {
                 "id": "cs_1",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_test1",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -192,6 +193,7 @@ async def test_webhook_is_idempotent(client, db_session, admin, billing_settings
             "object": {
                 "id": "cs_1",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_test1",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -220,6 +222,7 @@ async def test_webhook_subscription_deleted_falls_back_to_lite(client, db_sessio
             "object": {
                 "id": "cs_1",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_test2",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -262,6 +265,7 @@ async def test_client_cannot_declare_tier(client, db_session, admin, billing_set
             "object": {
                 "id": "cs_1",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_test3",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -292,6 +296,7 @@ async def test_webhook_subscription_updated_past_due_falls_back_to_lite(client, 
             "object": {
                 "id": "cs_upd1",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_upd1",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -343,6 +348,7 @@ async def test_webhook_subscription_updated_price_change_changes_tier(client, db
             "object": {
                 "id": "cs_upd2",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_upd2",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -390,6 +396,7 @@ async def test_webhook_subscription_updated_period_end_in_past_is_lite(client, d
             "object": {
                 "id": "cs_upd3",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_upd3",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -437,6 +444,7 @@ async def test_billing_webhook_writes_audit_event(client, db_session, admin, bil
             "object": {
                 "id": "cs_upd4",
                 "customer": "cus_test123",
+                "payment_status": "paid",
                 "subscription": "sub_upd4",
                 "metadata": {
                     "org_id": admin["org_id"],
@@ -537,3 +545,158 @@ async def test_checkout_creates_the_customer_with_the_admins_email_once(client, 
     created = [c for c in gateway.calls if c[0] == "create_customer"]
     assert len(created) == 1  # an existing customer is left as it is
     assert created[0][2] == "admin@example.com"
+
+
+# ---------------------------------------------------------------------------------------------------------
+# BRIEF-023 (CR-214 slice 1): a paid checkout is never lost. An event that cannot be applied answers 500
+# activation_failed with a reason, stores NO StripeEvent row and changes no subscription, so Stripe's retry
+# of the SAME event id is processed afresh once the data is put right, and activates exactly once.
+# ---------------------------------------------------------------------------------------------------------
+import logging
+
+from app.models import Organization, StripeEvent
+
+
+async def _post(client, event):
+    payload, sig = sign(event)
+    return await client.post("/webhooks/stripe", content=payload, headers={"Stripe-Signature": sig, "content-type": "application/json"})
+
+
+def _checkout_event(event_id, org_id, **fields):
+    obj = {
+        "id": "cs_" + event_id,
+        "customer": "cus_test123",
+        "subscription": "sub_" + event_id,
+        "payment_status": "paid",
+        "metadata": {"org_id": org_id, "price_id": "price_pro"},
+    }
+    obj.update(fields)
+    return {"id": event_id, "type": "checkout.session.completed", "data": {"object": obj}}
+
+
+def _with_price(price_id, target):
+    base = app.dependency_overrides[get_settings]
+
+    def settings():  # a copy: the fake gateway's override resets the shared cached Settings
+        s = base()
+        return s.model_copy(update={"STRIPE_PRICE_MAP": {**s.STRIPE_PRICE_MAP, price_id: target}})
+
+    app.dependency_overrides[get_settings] = settings
+
+
+async def _set_customer(db_session, org_id, customer_id):
+    org = await db_session.get(Organization, uuid.UUID(org_id))
+    org.stripe_customer_id = customer_id
+    await db_session.commit()
+
+
+# Each case: (reason, bad event fields, setup before the bad post, good event fields, correction before replay).
+def _no_op(admin, db_session):
+    return None
+
+
+FAIL_CASES = {
+    "unknown_price": (lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_new"}}, _no_op,
+                      lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_new"}},
+                      lambda a, db: _with_price("price_new", "devgenie:pro")),
+    "unknown_plan": (lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_gold"}},
+                     lambda a, db: _with_price("price_gold", "devgenie:gold"),
+                     lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_gold"}},
+                     lambda a, db: _with_price("price_gold", "devgenie:pro")),
+    "missing_org": (lambda a: {"metadata": {"price_id": "price_pro"}}, _no_op, lambda a: {}, _no_op),
+    "unknown_org": (lambda a: {"metadata": {"org_id": str(uuid.uuid4()), "price_id": "price_pro"}}, _no_op,
+                    lambda a: {}, _no_op),
+    "missing_customer": (lambda a: {"customer": None}, _no_op, lambda a: {}, _no_op),
+    "missing_subscription": (lambda a: {"subscription": None}, _no_op, lambda a: {}, _no_op),
+    "unpaid_session": (lambda a: {"payment_status": "unpaid"}, _no_op, lambda a: {}, _no_op),
+    "customer_mismatch": (lambda a: {}, lambda a, db: _set_customer(db, a["org_id"], "cus_other"),
+                          lambda a: {"customer": "cus_other"}, _no_op),
+}
+
+
+async def _maybe_await(value):
+    if hasattr(value, "__await__"):
+        await value
+
+
+async def _devgenie_subs(db_session, org_id):
+    return (await db_session.execute(select(Subscription).where(
+        Subscription.org_id == uuid.UUID(org_id), Subscription.product == "devgenie"))).scalars().all()
+
+
+async def _activated_audits(db_session, org_id):
+    return (await db_session.execute(select(AuditEvent).where(
+        AuditEvent.org_id == uuid.UUID(org_id), AuditEvent.action == "billing_subscription_activated"))).scalars().all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", list(FAIL_CASES))
+async def test_checkout_that_cannot_activate_fails_loud_and_the_retry_activates_once(client, db_session, admin, billing_settings, reason):
+    bad, setup, good, correct = FAIL_CASES[reason]
+    event_id = "evt_fail_" + reason
+    await _maybe_await(setup(admin, db_session))
+
+    res = await _post(client, _checkout_event(event_id, admin["org_id"], **bad(admin)))
+    assert res.status_code == 500, res.text
+    assert res.json()["error"] == {"code": "activation_failed", "message": reason}
+    db_session.expire_all()
+    assert await db_session.get(StripeEvent, event_id) is None  # not marked processed: the retry is not skipped
+    assert await _devgenie_subs(db_session, admin["org_id"]) == []
+
+    await _maybe_await(correct(admin, db_session))
+    replay = _checkout_event(event_id, admin["org_id"], **good(admin))
+    for _ in range(2):  # Stripe's retry activates; a duplicate after success stays a harmless 200
+        res = await _post(client, replay)
+        assert res.status_code == 200, res.text
+    db_session.expire_all()
+    subs = await _devgenie_subs(db_session, admin["org_id"])
+    assert [(s.status, s.source) for s in subs] == [("active", "stripe")]
+    assert len(await _activated_audits(db_session, admin["org_id"])) == 1
+    assert await db_session.get(StripeEvent, event_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_fully_discounted_checkout_activates(client, db_session, admin, billing_settings):
+    res = await _post(client, _checkout_event("evt_promo", admin["org_id"], payment_status="no_payment_required"))
+    assert res.status_code == 200, res.text
+    assert [s.status for s in await _devgenie_subs(db_session, admin["org_id"])] == ["active"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", ["customer.subscription.updated", "customer.subscription.deleted"])
+async def test_subscription_event_before_its_checkout_fails_loud_then_applies(client, db_session, admin, billing_settings, event_type):
+    early = {"id": "evt_early", "type": event_type, "data": {"object": {"id": "sub_evt_chk", "status": "past_due"}}}
+    res = await _post(client, early)
+    assert res.status_code == 500, res.text
+    assert res.json()["error"] == {"code": "activation_failed", "message": "unknown_subscription"}
+    db_session.expire_all()
+    assert await db_session.get(StripeEvent, "evt_early") is None
+
+    assert (await _post(client, _checkout_event("evt_chk", admin["org_id"]))).status_code == 200
+    res = await _post(client, early)  # Stripe's retry, after the checkout landed
+    assert res.status_code == 200, res.text
+    db_session.expire_all()
+    [sub] = await _devgenie_subs(db_session, admin["org_id"])
+    assert sub.status == ("past_due" if event_type.endswith("updated") else "cancelled")
+
+
+@pytest.mark.asyncio
+async def test_activation_failure_logs_an_error_without_the_payload(client, db_session, admin, billing_settings, caplog):
+    caplog.set_level(logging.ERROR)
+    res = await _post(client, _checkout_event("evt_log", admin["org_id"], payment_status="unpaid"))
+    assert res.status_code == 500
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    line = errors[0].getMessage()
+    for part in ("evt_log", "checkout.session.completed", "unpaid_session", admin["org_id"]):
+        assert part in line
+    for secret in ("cus_test123", "whsec_test", "cs_evt_log"):
+        assert secret not in line
+
+
+@pytest.mark.asyncio
+async def test_an_unhandled_event_type_is_a_recorded_no_op(client, db_session, billing_settings):
+    res = await _post(client, {"id": "evt_other", "type": "invoice.created", "data": {"object": {}}})
+    assert res.status_code == 200
+    db_session.expire_all()
+    assert await db_session.get(StripeEvent, "evt_other") is not None

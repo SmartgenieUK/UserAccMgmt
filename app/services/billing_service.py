@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
-from app.core.exceptions import ValidationError
+from app.core.exceptions import ActivationError, ValidationError
 from app.models import Organization, Plan, Subscription, StripeEvent
 from app.services.audit_service import AuditService
 from app.services.stripe_gateway import StripeGateway
@@ -88,153 +88,161 @@ class BillingService:
         }
 
     async def handle_event(self, event: dict) -> None:
+        """Apply a Stripe event, then mark it processed in the same transaction.
+
+        The StripeEvent row records success, not receipt. When the effect cannot be applied this raises
+        ActivationError and records nothing; the route rolls back and answers 500, so Stripe's retry of the
+        same event is processed afresh. An event type we do not handle is a recorded no-op.
+        """
         event_id = event["id"]
         event_type = event["type"]
-        
-        # Idempotency
-        existing_event = await self.session.get(StripeEvent, event_id)
-        if existing_event:
+
+        # Idempotency: an event on record was applied; a duplicate delivery is a harmless no-op.
+        if await self.session.get(StripeEvent, event_id):
             return
-            
-        stripe_event = StripeEvent(event_id=event_id, type=event_type)
-        self.session.add(stripe_event)
-        
+
+        data_object = event.get("data", {}).get("object", {})
+
+        if event_type == "checkout.session.completed":
+            await self._activate(data_object)
+        elif event_type == "customer.subscription.updated":
+            await self._update(data_object)
+        elif event_type == "customer.subscription.deleted":
+            await self._cancel(data_object)
+
+        self.session.add(StripeEvent(event_id=event_id, type=event_type))
         try:
             await self.session.flush()
         except IntegrityError:
+            # A concurrent delivery of the same event applied it first; drop ours.
             await self.session.rollback()
-            return
-            
-        data_object = event.get("data", {}).get("object", {})
-        
-        if event_type == "checkout.session.completed":
-            metadata = data_object.get("metadata", {})
-            price_id = metadata.get("price_id")
-            
-            if not price_id or price_id not in self.settings.STRIPE_PRICE_MAP:
-                return
-                
-            product_tier = self.settings.STRIPE_PRICE_MAP[price_id]
-            product, tier = product_tier.split(":", 1)
-            
-            org_id_str = metadata.get("org_id")
-            if not org_id_str:
-                return
-                
-            org_id = uuid.UUID(org_id_str)
-            org = await self.session.get(Organization, org_id)
-            if not org:
-                return
-                
-            stripe_customer_id = data_object.get("customer")
-            stripe_subscription_id = data_object.get("subscription")
-            if not stripe_customer_id:
-                return
-                
-            if org.stripe_customer_id != stripe_customer_id:
-                org.stripe_customer_id = stripe_customer_id
-                
-            plan_result = await self.session.execute(
-                select(Plan).where(Plan.product == product, Plan.code == tier)
+
+    async def _activate(self, data_object: dict) -> None:
+        metadata = data_object.get("metadata", {})
+        price_id = metadata.get("price_id")
+        if not price_id or price_id not in self.settings.STRIPE_PRICE_MAP:
+            raise ActivationError("unknown_price", org_id=metadata.get("org_id"))
+        product, tier = self.settings.STRIPE_PRICE_MAP[price_id].split(":", 1)
+
+        org_id_str = metadata.get("org_id")
+        if not org_id_str:
+            raise ActivationError("missing_org")
+        try:
+            org = await self.session.get(Organization, uuid.UUID(org_id_str))
+        except ValueError:
+            org = None
+        if not org:
+            raise ActivationError("unknown_org", org_id=org_id_str)
+
+        # Paid, or a 100%-off promotion code; a completed-but-unpaid session is not a silent no-op.
+        if data_object.get("payment_status") not in ("paid", "no_payment_required"):
+            raise ActivationError("unpaid_session", org_id=org_id_str)
+
+        stripe_customer_id = data_object.get("customer")
+        if not stripe_customer_id:
+            raise ActivationError("missing_customer", org_id=org_id_str)
+        stripe_subscription_id = data_object.get("subscription")
+        if not stripe_subscription_id:
+            raise ActivationError("missing_subscription", org_id=org_id_str)
+        if org.stripe_customer_id and org.stripe_customer_id != stripe_customer_id:
+            raise ActivationError("customer_mismatch", org_id=org_id_str)
+        org.stripe_customer_id = stripe_customer_id
+
+        plan_result = await self.session.execute(
+            select(Plan).where(Plan.product == product, Plan.code == tier)
+        )
+        plan = plan_result.scalar_one_or_none()
+        if not plan:
+            raise ActivationError("unknown_plan", org_id=org_id_str)
+
+        sub_result = await self.session.execute(
+            select(Subscription).where(Subscription.org_id == org.id, Subscription.product == product)
+        )
+        subscription = sub_result.scalar_one_or_none()
+
+        if not subscription:
+            subscription = Subscription(
+                org_id=org.id,
+                product=product,
+                plan_id=plan.id,
+                status="active",
+                source="stripe",
+                stripe_customer_id=stripe_customer_id,
+                stripe_subscription_id=stripe_subscription_id
             )
-            plan = plan_result.scalar_one_or_none()
-            if not plan:
-                return
-                
+            self.session.add(subscription)
+        else:
+            subscription.plan_id = plan.id
+            subscription.status = "active"
+            subscription.source = "stripe"
+            subscription.stripe_customer_id = stripe_customer_id
+            subscription.stripe_subscription_id = stripe_subscription_id
+
+        await self.session.flush()
+        await self.audit_service.log_event(
+            action="billing_subscription_activated",
+            org_id=str(org.id),
+            metadata={"product": product, "tier": tier, "stripe_subscription_id": stripe_subscription_id}
+        )
+
+    async def _known_subscription(self, data_object: dict) -> Subscription:
+        # A subscription event can arrive before its checkout event; 500 makes Stripe retry it later.
+        stripe_subscription_id = data_object.get("id")
+        subscription = None
+        if stripe_subscription_id:
             sub_result = await self.session.execute(
-                select(Subscription).where(Subscription.org_id == org.id, Subscription.product == product)
+                select(Subscription).where(Subscription.stripe_subscription_id == stripe_subscription_id)
             )
             subscription = sub_result.scalar_one_or_none()
-            
-            if not subscription:
-                subscription = Subscription(
-                    org_id=org.id,
-                    product=product,
-                    plan_id=plan.id,
-                    status="active",
-                    source="stripe",
-                    stripe_customer_id=stripe_customer_id,
-                    stripe_subscription_id=stripe_subscription_id
+        if not subscription:
+            raise ActivationError("unknown_subscription")
+        return subscription
+
+    async def _update(self, data_object: dict) -> None:
+        subscription = await self._known_subscription(data_object)
+
+        stripe_status = data_object.get("status")
+        status_map = {
+            "active": "active",
+            "trialing": "trialing",
+            "past_due": "past_due",
+            "canceled": "cancelled"
+        }
+        if stripe_status in status_map:
+            subscription.status = status_map[stripe_status]
+
+        # Note: current_period_end comes as a unix timestamp in stripe
+        # wait, the spec says update current_period_end; we can do this if present in data_object.
+        from datetime import datetime, timezone
+        period_end = data_object.get("current_period_end")
+        if period_end:
+            subscription.current_period_end = datetime.fromtimestamp(period_end, tz=timezone.utc)
+
+        # Check if price changed
+        items = data_object.get("items", {}).get("data", [])
+        if items:
+            price_id = items[0].get("price", {}).get("id")
+            if price_id and price_id in self.settings.STRIPE_PRICE_MAP:
+                product_tier = self.settings.STRIPE_PRICE_MAP[price_id]
+                product, tier = product_tier.split(":", 1)
+                plan_result = await self.session.execute(
+                    select(Plan).where(Plan.product == product, Plan.code == tier)
                 )
-                self.session.add(subscription)
-            else:
-                subscription.plan_id = plan.id
-                subscription.status = "active"
-                subscription.source = "stripe"
-                subscription.stripe_customer_id = stripe_customer_id
-                subscription.stripe_subscription_id = stripe_subscription_id
-            
-            await self.session.flush()
-            await self.audit_service.log_event(
-                action="billing_subscription_activated",
-                org_id=str(org.id),
-                metadata={"product": product, "tier": tier, "stripe_subscription_id": stripe_subscription_id}
-            )
+                plan = plan_result.scalar_one_or_none()
+                if plan:
+                    subscription.plan_id = plan.id
 
-        elif event_type == "customer.subscription.updated":
-            stripe_subscription_id = data_object.get("id")
-            if not stripe_subscription_id:
-                return
-                
-            sub_result = await self.session.execute(
-                select(Subscription).where(Subscription.stripe_subscription_id == stripe_subscription_id)
-            )
-            subscription = sub_result.scalar_one_or_none()
-            if not subscription:
-                return
-                
-            stripe_status = data_object.get("status")
-            status_map = {
-                "active": "active",
-                "trialing": "trialing",
-                "past_due": "past_due",
-                "canceled": "cancelled"
-            }
-            if stripe_status in status_map:
-                subscription.status = status_map[stripe_status]
-            
-            # Note: current_period_end comes as a unix timestamp in stripe
-            # wait, the spec says update current_period_end; we can do this if present in data_object.
-            from datetime import datetime, timezone
-            period_end = data_object.get("current_period_end")
-            if period_end:
-                subscription.current_period_end = datetime.fromtimestamp(period_end, tz=timezone.utc)
-            
-            # Check if price changed
-            items = data_object.get("items", {}).get("data", [])
-            if items:
-                price_id = items[0].get("price", {}).get("id")
-                if price_id and price_id in self.settings.STRIPE_PRICE_MAP:
-                    product_tier = self.settings.STRIPE_PRICE_MAP[price_id]
-                    product, tier = product_tier.split(":", 1)
-                    plan_result = await self.session.execute(
-                        select(Plan).where(Plan.product == product, Plan.code == tier)
-                    )
-                    plan = plan_result.scalar_one_or_none()
-                    if plan:
-                        subscription.plan_id = plan.id
-                        
-            await self.audit_service.log_event(
-                action="billing_subscription_updated",
-                org_id=str(subscription.org_id),
-                metadata={"stripe_subscription_id": stripe_subscription_id, "status": subscription.status}
-            )
+        await self.audit_service.log_event(
+            action="billing_subscription_updated",
+            org_id=str(subscription.org_id),
+            metadata={"stripe_subscription_id": data_object["id"], "status": subscription.status}
+        )
 
-        elif event_type == "customer.subscription.deleted":
-            stripe_subscription_id = data_object.get("id")
-            if not stripe_subscription_id:
-                return
-                
-            sub_result = await self.session.execute(
-                select(Subscription).where(Subscription.stripe_subscription_id == stripe_subscription_id)
-            )
-            subscription = sub_result.scalar_one_or_none()
-            if not subscription:
-                return
-                
-            subscription.status = "cancelled"
-            await self.audit_service.log_event(
-                action="billing_subscription_cancelled",
-                org_id=str(subscription.org_id),
-                metadata={"stripe_subscription_id": stripe_subscription_id}
-            )
+    async def _cancel(self, data_object: dict) -> None:
+        subscription = await self._known_subscription(data_object)
+        subscription.status = "cancelled"
+        await self.audit_service.log_event(
+            action="billing_subscription_cancelled",
+            org_id=str(subscription.org_id),
+            metadata={"stripe_subscription_id": data_object["id"]}
+        )

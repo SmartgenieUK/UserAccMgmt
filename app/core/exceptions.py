@@ -42,6 +42,15 @@ class RateLimitError(AppError):
         super().__init__(detail, status_code=429, code=code)
 
 
+class ActivationError(AppError):
+    """A Stripe event whose effect could not be applied. 500, so Stripe retries it; the reason is the message."""
+
+    def __init__(self, reason: str, org_id: str | None = None):
+        super().__init__(reason, status_code=500, code="activation_failed")
+        self.reason = reason
+        self.org_id = org_id
+
+
 def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
