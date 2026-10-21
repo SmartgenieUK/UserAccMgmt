@@ -49,15 +49,21 @@ class BillingService:
         )
         return url
 
-    async def create_portal_session(self, org: Organization, actor_user_id: str, flow: str | None = None) -> str:
+    async def create_portal_session(
+        self, org: Organization, actor_user_id: str, flow: str | None = None, product: str | None = None
+    ) -> str:
         if not org.stripe_customer_id:
             raise ValidationError("Organization has no stripe customer", code="no_customer")
 
         cancel_subscription_id = None
         if flow == "cancel":
             result = await self.session.execute(
+                # UAM is shared across products: cancel only this product's live Stripe subscription.
                 select(Subscription.stripe_subscription_id).where(
-                    Subscription.org_id == org.id, Subscription.stripe_subscription_id.is_not(None)
+                    Subscription.org_id == org.id,
+                    Subscription.product == product,
+                    Subscription.status.in_(("active", "trialing", "past_due")),
+                    Subscription.stripe_subscription_id.is_not(None),
                 )
             )
             cancel_subscription_id = result.scalars().first()
@@ -74,7 +80,7 @@ class BillingService:
             action="billing_portal_opened",
             user_id=actor_user_id,
             org_id=str(org.id),
-            metadata={"flow": flow} if flow else None,
+            metadata={"flow": flow, "product": product} if flow else None,
         )
         return url
 

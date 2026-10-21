@@ -143,7 +143,7 @@ def _portal_url(admin):
 @pytest.mark.asyncio
 async def test_the_cancel_flow_opens_stripes_cancel_confirmation_for_the_orgs_subscription(client, db_session, admin, gateway):
     sub = await _activate(client, admin, "evt_p6")
-    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel"})
+    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
     assert res.status_code == 200, res.text
     assert gateway.calls[-1] == ("create_portal_session", "cus_test123", sub)
 
@@ -160,7 +160,7 @@ async def test_without_a_flow_the_portal_session_is_unchanged(client, db_session
 async def test_the_cancel_flow_without_a_subscription_is_refused(client, db_session, admin, gateway):
     assert (await client.post(f"/api/v1/orgs/{admin['org_id']}/billing/checkout-session", headers=admin["headers"],
                               json={"price_id": "price_pro"})).status_code == 200  # a customer, no subscription yet
-    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel"})
+    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
     assert res.status_code == 422
     assert res.json()["error"]["code"] == "no_subscription"
 
@@ -192,3 +192,53 @@ def test_the_gateway_sends_stripe_the_cancel_flow(monkeypatch):
         "subscription_cancel": {"subscription": "sub_1"},
         "after_completion": {"type": "redirect", "redirect": {"return_url": "https://back.test"}},
     }
+
+
+@pytest.mark.asyncio
+async def test_the_cancel_flow_needs_a_product(client, db_session, admin, gateway):
+    await _activate(client, admin, "evt_p9")
+    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel"})
+    assert res.status_code == 422
+    assert not [c for c in gateway.calls if c[0] == "create_portal_session"]
+
+
+@pytest.mark.asyncio
+async def test_the_cancel_flow_picks_this_products_live_subscription(client, db_session, admin, gateway):
+    # UAM is shared: another product's subscription and an old cancelled one must never be the one cancelled.
+    import uuid
+
+    from sqlalchemy import select
+
+    from app.models import Organization, Plan, Subscription
+
+    org_id = uuid.UUID(admin["org_id"])
+    org = await db_session.get(Organization, org_id)
+    org.stripe_customer_id = "cus_test123"
+    pro = (await db_session.execute(select(Plan).where(Plan.product == "devgenie", Plan.code == "pro"))).scalar_one()
+    other = Organization(name="Old", slug=f"old-{admin['org_id'][:8]}")
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add_all([
+        # a different product in the same org (its plan row is borrowed; only product + status matter here)
+        Subscription(org_id=org_id, product="cloudgenie", plan_id=pro.id, status="active", source="stripe",
+                     stripe_customer_id="cus_test123", stripe_subscription_id="sub_cloudgenie"),
+        # an old, cancelled devgenie subscription (in another org row, since (org, product) is unique)
+        Subscription(org_id=other.id, product="devgenie", plan_id=pro.id, status="cancelled", source="stripe",
+                     stripe_customer_id="cus_test123", stripe_subscription_id="sub_devgenie_old"),
+    ])
+    await db_session.commit()
+    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
+    assert res.status_code == 422 and res.json()["error"]["code"] == "no_subscription"  # nothing live for devgenie yet
+
+    await _activate(client, admin, "evt_p10")  # the live devgenie subscription: sub_evt_p10
+    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
+    assert res.status_code == 200, res.text
+    assert gateway.calls[-1] == ("create_portal_session", "cus_test123", "sub_evt_p10")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_subscription_is_not_offered_the_cancel_flow(client, db_session, admin, gateway):
+    sub = await _activate(client, admin, "evt_p11")
+    assert (await _post(client, _updated("evt_p11_gone", sub, status="canceled", cancel_at_period_end=False))).status_code == 200
+    res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
+    assert res.status_code == 422 and res.json()["error"]["code"] == "no_subscription"

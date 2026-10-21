@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.core.config import get_settings, Settings
 from app.core.exceptions import ForbiddenError
@@ -26,6 +26,13 @@ class CheckoutSessionRequest(BaseModel):
 
 class PortalSessionRequest(BaseModel):
     flow: Literal["cancel"] | None = None  # "cancel" opens Stripe's portal at the cancel confirmation
+    product: str | None = None  # which product's subscription to cancel; required with flow="cancel"
+
+    @model_validator(mode="after")
+    def _cancel_names_a_product(self):
+        if self.flow == "cancel" and not self.product:
+            raise ValueError('flow "cancel" requires a product')
+        return self
 
 
 class UrlResponse(BaseModel):
@@ -76,7 +83,7 @@ async def create_portal_session(
 ):
     _require_org(membership, org_id, admin=True)
     org = await session.get(Organization, uuid.UUID(org_id))
-    url = await service.create_portal_session(org, str(current_user.id), flow=data.flow if data else None)
+    url = await service.create_portal_session(org, str(current_user.id), flow=data.flow if data else None, product=data.product if data else None)
     await session.commit()
     return UrlResponse(url=url)
 
