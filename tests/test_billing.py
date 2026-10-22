@@ -874,15 +874,89 @@ async def test_bug08_f1_a_local_live_subscription_refuses_checkout(client, db_se
 
 
 @pytest.mark.asyncio
-async def test_bug08_f1_a_stripe_listed_subscription_refuses_checkout_before_its_webhook(client, db_session, admin, billing_settings):
+@pytest.mark.parametrize("live_status", ["trialing", "active", "past_due", "unpaid", "incomplete", "paused"])
+async def test_bug08_f1_a_stripe_listed_subscription_refuses_checkout_before_its_webhook(client, db_session, admin, billing_settings, live_status):
     gw = billing_settings
     await _set_customer(db_session, admin["org_id"], "cus_test123")
     gw.seed("sub_other_product", price="price_cloud")  # not this product: listed first, ignored
-    gw.seed("sub_paid_no_webhook_yet", status="active", price="price_pro")
+    gw.seed("sub_paid_no_webhook_yet", status=live_status, price="price_pro")
     res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
     assert res.status_code == 409, res.text
     assert res.json()["error"]["code"] == "subscription_exists"
     assert _created(gw) == []
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_a_local_live_row_refuses_checkout_without_asking_stripe(client, db_session, admin, billing_settings):
+    gw = billing_settings  # Stripe's listing is empty: only the local row can refuse
+    await _put_row(db_session, admin["org_id"], "sub_local_live", status="active", period_end=FUTURE, cancel=False)
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    assert res.status_code == 409, res.text
+    assert res.json()["error"]["code"] == "subscription_exists"
+    assert not [c for c in gw.calls if c[0] in ("list_subscriptions", "list_open_checkout_sessions")]
+    assert _created(gw) == []
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_open_sessions_are_listed_before_subscriptions(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _set_customer(db_session, admin["org_id"], "cus_test123")
+    gw.open_sessions.append({"customer": "cus_test123", "url": "https://checkout.stripe.test/open-pro",
+                             "metadata": {"org_id": admin["org_id"], "price_id": "price_pro"}})
+    listed = gw.list_open_checkout_sessions
+
+    def sessions_then_completion(customer_id):
+        # The open session completes on Stripe between UAM's two calls: it leaves the open list and its
+        # subscription appears. Listing sessions first means the subscription listing that follows sees it.
+        result = listed(customer_id)
+        gw.open_sessions.clear()
+        gw.seed("sub_completed_between_calls")
+        return result
+
+    gw.list_open_checkout_sessions = sessions_then_completion
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    order = [c[0] for c in gw.calls if c[0] in ("list_subscriptions", "list_open_checkout_sessions")]
+    assert order == ["list_open_checkout_sessions", "list_subscriptions"]
+    assert res.status_code == 409, res.text
+    assert _created(gw) == []
+
+
+def _two_item_sub(sub_id, status="active", dev_price="price_ent", dev_period=None, other_period=None):
+    """Another product's item first, DevGenie's second."""
+    other = {"price": {"id": "price_cloud"}, **({"current_period_end": other_period} if other_period else {})}
+    dev = {"price": {"id": dev_price}, **({"current_period_end": dev_period} if dev_period else {})}
+    return {"id": sub_id, "customer": "cus_test123", "status": status, "items": {"data": [other, dev]}}
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_a_listed_subscription_whose_devgenie_item_is_not_first_refuses_checkout(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _set_customer(db_session, admin["org_id"], "cus_test123")
+    gw.subscriptions_by_customer["cus_test123"] = [_two_item_sub("sub_bundle")]
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    assert res.status_code == 409, res.text
+    assert _created(gw) == []
+
+
+@pytest.mark.asyncio
+async def test_bug08_f2_reconcile_takes_devgenies_own_item_for_plan_and_period(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    sub = await _activate_seeded(client, gw, admin, "evt_f2item", period_end=FUTURE)
+    gw.subscriptions_by_id[sub] = _two_item_sub(sub, dev_price="price_ent", dev_period=LATER, other_period=PAST)
+    assert (await _post(client, _updated_event("evt_f2item_upd", sub, status="active"))).status_code == 200
+    row = await _row(db_session, admin["org_id"])
+    plan = await db_session.get(Plan, row.plan_id)
+    assert plan.code == "enterprise"
+    assert _epoch(row.current_period_end) == LATER
+
+
+@pytest.mark.asyncio
+async def test_bug08_f2_a_same_id_update_without_a_flag_keeps_the_stored_flag(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _put_row(db_session, admin["org_id"], "sub_flagged", status="active", period_end=FUTURE, cancel=True)
+    gw.seed("sub_flagged", period_end=FUTURE)  # Stripe's answer carries no cancel_at_period_end
+    assert (await _post(client, _updated_event("evt_f2flag", "sub_flagged", status="active"))).status_code == 200
+    assert (await _row(db_session, admin["org_id"])).cancel_at_period_end is True
 
 
 @pytest.mark.asyncio
@@ -1028,18 +1102,20 @@ async def test_bug08_f2_a_late_checkout_for_a_cancelled_subscription_lands_cance
 
 
 @pytest.mark.asyncio
-async def test_bug08_f2_stripe_unreachable_on_an_update_is_500_with_no_effect(client, db_session, admin, billing_settings):
+@pytest.mark.parametrize("make_event", [_updated_event, _deleted_event], ids=["updated", "deleted"])
+async def test_bug08_f2_stripe_unreachable_on_an_update_is_500_with_no_effect(client, db_session, admin, billing_settings, make_event):
     gw = billing_settings
     sub = await _activate_seeded(client, gw, admin, "evt_f2down")
     gw.fail_retrieve = True
-    res = await _post(client, _updated_event("evt_f2down_upd", sub, status="past_due"))
+    res = await _post(client, make_event("evt_f2down_upd", sub, status="canceled"))
     assert res.status_code == 500, res.text
     assert res.json()["error"] == {"code": "activation_failed", "message": "stripe_unavailable"}
     assert (await _row(db_session, admin["org_id"])).status == "active"
     assert await db_session.get(StripeEvent, "evt_f2down_upd") is None
-    updated = (await db_session.execute(select(AuditEvent).where(
-        AuditEvent.org_id == uuid.UUID(admin["org_id"]), AuditEvent.action == "billing_subscription_updated"))).scalars().all()
-    assert updated == []
+    effects = (await db_session.execute(select(AuditEvent).where(
+        AuditEvent.org_id == uuid.UUID(admin["org_id"]),
+        AuditEvent.action.in_(("billing_subscription_updated", "billing_subscription_cancelled"))))).scalars().all()
+    assert effects == []
 
 
 @pytest.mark.asyncio
