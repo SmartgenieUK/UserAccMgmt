@@ -636,7 +636,8 @@ async def test_checkout_that_cannot_activate_fails_loud_and_the_retry_activates_
     event_id = "evt_fail_" + reason
     await _maybe_await(setup(admin, db_session))
 
-    res = await _post(client, _checkout_event(event_id, admin["org_id"], **bad(admin)))
+    first = _checkout_event(event_id, admin["org_id"], **bad(admin))
+    res = await _post(client, first)
     assert res.status_code == 500, res.text
     assert res.json()["error"] == {"code": "activation_failed", "message": reason}
     db_session.expire_all()
@@ -645,6 +646,8 @@ async def test_checkout_that_cannot_activate_fails_loud_and_the_retry_activates_
 
     await _maybe_await(correct(admin, db_session))
     replay = _checkout_event(event_id, admin["org_id"], **good(admin))
+    # BUG-08 F4: Stripe retries the SAME bytes under the same event id; a replay with a changed body proves nothing.
+    assert json.dumps(replay) == json.dumps(first), "the retry body differs from the first delivery"
     for _ in range(2):  # Stripe's retry activates; a duplicate after success stays a harmless 200
         res = await _post(client, replay)
         assert res.status_code == 200, res.text
