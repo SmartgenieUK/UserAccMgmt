@@ -46,9 +46,33 @@ async def _add_member(client, db_session, sent_otps, org_id: str, email: str) ->
 
 
 class FakeStripeGateway(StripeGateway):
+    """One instance per test (BUG-08). Tests seed Stripe's authoritative state explicitly; it is never derived
+    from the event under test."""
+
     def __init__(self, settings):
         super().__init__(settings)
         self.calls = []
+        self.subscriptions_by_id = {}
+        self.subscriptions_by_customer = {}
+        self.open_sessions = []
+        self.fail_retrieve = False
+        self.fail_list = False
+
+    def seed(self, sub_id, status="active", price="price_pro", period_end=None, top_period_end=None, cancel=None,
+             customer="cus_test123"):
+        """Stripe's current state for one subscription; `period_end` sits on the item, as in 2025+ API versions."""
+        item = {"price": {"id": price}}
+        if period_end is not None:
+            item["current_period_end"] = period_end
+        sub = {"id": sub_id, "customer": customer, "status": status, "items": {"data": [item]}}
+        if top_period_end is not None:
+            sub["current_period_end"] = top_period_end
+        if cancel is not None:
+            sub["cancel_at_period_end"] = cancel
+        self.subscriptions_by_id[sub_id] = sub
+        listed = [s for s in self.subscriptions_by_customer.get(customer, []) if s["id"] != sub_id]
+        self.subscriptions_by_customer[customer] = listed + [sub]
+        return sub
 
     def create_customer(self, name: str, email: str, metadata: dict) -> str:
         self.calls.append(("create_customer", name, email, metadata))
@@ -56,7 +80,33 @@ class FakeStripeGateway(StripeGateway):
 
     def create_checkout_session(self, customer_id: str, price_id: str, success_url: str, cancel_url: str, metadata: dict) -> str:
         self.calls.append(("create_checkout_session", customer_id, price_id, metadata))
+        self.open_sessions.append({"customer": customer_id, "url": "https://checkout.stripe.test/session", "metadata": dict(metadata)})
         return "https://checkout.stripe.test/session"
+
+    def retrieve_subscription(self, subscription_id: str) -> dict:
+        import copy
+        import stripe
+        self.calls.append(("retrieve_subscription", subscription_id))
+        if self.fail_retrieve:
+            raise stripe.error.APIConnectionError("stripe is down")
+        if subscription_id not in self.subscriptions_by_id:
+            raise stripe.error.InvalidRequestError(f"No such subscription: {subscription_id}", "id")
+        return copy.deepcopy(self.subscriptions_by_id[subscription_id])
+
+    def list_subscriptions(self, customer_id: str) -> list[dict]:
+        import copy
+        import stripe
+        self.calls.append(("list_subscriptions", customer_id))
+        if self.fail_list:
+            raise stripe.error.APIConnectionError("stripe is down")
+        return copy.deepcopy(self.subscriptions_by_customer.get(customer_id, []))
+
+    def list_open_checkout_sessions(self, customer_id: str) -> list[dict]:
+        import stripe
+        self.calls.append(("list_open_checkout_sessions", customer_id))
+        if self.fail_list:
+            raise stripe.error.APIConnectionError("stripe is down")
+        return [{"url": s["url"], "metadata": dict(s["metadata"])} for s in self.open_sessions if s["customer"] == customer_id]
 
     def create_portal_session(self, customer_id: str, return_url: str, cancel_subscription_id: str | None = None) -> str:
         self.calls.append(("create_portal_session", customer_id, cancel_subscription_id))
@@ -79,8 +129,9 @@ def billing_settings():
         return s
 
     app.dependency_overrides[get_settings] = get_test_settings
-    app.dependency_overrides[get_stripe_gateway] = lambda: FakeStripeGateway(get_test_settings())
-    yield
+    gateway = FakeStripeGateway(get_test_settings())  # one per test, reused across requests (BUG-08)
+    app.dependency_overrides[get_stripe_gateway] = lambda: gateway
+    yield gateway
     app.dependency_overrides.pop(get_settings, None)
     app.dependency_overrides.pop(get_stripe_gateway, None)
 
@@ -536,8 +587,7 @@ def test_a_new_stripe_customer_carries_the_buyers_email(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_checkout_creates_the_customer_with_the_admins_email_once(client, db_session, admin, billing_settings):
-    gateway = FakeStripeGateway(get_settings())
-    app.dependency_overrides[get_stripe_gateway] = lambda: gateway
+    gateway = billing_settings
     path = f"/api/v1/orgs/{admin['org_id']}/billing/checkout-session"
     for _ in range(2):
         res = await client.post(path, headers=admin["headers"], json={"price_id": "price_pro"})
@@ -703,3 +753,323 @@ async def test_an_unhandled_event_type_is_a_recorded_no_op(client, db_session, b
     assert res.status_code == 200
     db_session.expire_all()
     assert await db_session.get(StripeEvent, "evt_other") is not None
+
+
+# ---------------------------------------------------------------------------------------------------------
+# BUG-08: subscription integrity. F1 one live subscription per org and product (checkout guard, conflicting
+# activation); F2 Stripe's current state wins over event bodies; F3 a replacement carries its own period.
+# Stripe's state is seeded on the per-test gateway; event bodies carry deliberately stale or contrary values.
+# ---------------------------------------------------------------------------------------------------------
+from datetime import datetime, timezone
+
+from app.services.audit_service import AuditService
+from app.services.entitlement_service import EntitlementService
+
+FUTURE = int(time.time()) + 30 * 86400
+LATER = FUTURE + 30 * 86400
+PAST = int(time.time()) - 30 * 86400
+
+
+def _checkout_url(admin):
+    return f"/api/v1/orgs/{admin['org_id']}/billing/checkout-session"
+
+
+def _created(gateway):
+    return [c for c in gateway.calls if c[0] == "create_checkout_session"]
+
+
+def _updated_event(event_id, sub_id, **body):
+    return {"id": event_id, "type": "customer.subscription.updated", "data": {"object": {"id": sub_id, **body}}}
+
+
+def _deleted_event(event_id, sub_id, **body):
+    return {"id": event_id, "type": "customer.subscription.deleted", "data": {"object": {"id": sub_id, **body}}}
+
+
+def _epoch(dt):
+    return int(dt.replace(tzinfo=timezone.utc).timestamp())
+
+
+async def _row(db_session, org_id):
+    db_session.expire_all()
+    [sub] = await _devgenie_subs(db_session, org_id)
+    return sub
+
+
+async def _put_row(db_session, org_id, sub_id, status, period_end, cancel):
+    org = await db_session.get(Organization, uuid.UUID(org_id))
+    org.stripe_customer_id = "cus_test123"
+    pro = (await db_session.execute(select(Plan).where(Plan.product == "devgenie", Plan.code == "pro"))).scalar_one()
+    db_session.add(Subscription(
+        org_id=org.id, product="devgenie", plan_id=pro.id, status=status, source="stripe",
+        stripe_customer_id="cus_test123", stripe_subscription_id=sub_id,
+        current_period_end=datetime.fromtimestamp(period_end, tz=timezone.utc) if period_end else None,
+        cancel_at_period_end=cancel,
+    ))
+    await db_session.commit()
+
+
+async def _activate_seeded(client, gateway, admin, event_id, **seed):
+    gateway.seed("sub_" + event_id, **seed)
+    res = await _post(client, _checkout_event(event_id, admin["org_id"]))
+    assert res.status_code == 200, res.text
+    return "sub_" + event_id
+
+
+# --- F1: one live subscription per org and product --------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_bug08_f1_a_local_live_subscription_refuses_checkout(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _activate_seeded(client, gw, admin, "evt_f1a")
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_ent"})
+    assert res.status_code == 409, res.text
+    assert res.json()["error"]["code"] == "subscription_exists"
+    assert _created(gw) == []
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_a_stripe_listed_subscription_refuses_checkout_before_its_webhook(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _set_customer(db_session, admin["org_id"], "cus_test123")
+    gw.seed("sub_other_product", price="price_cloud")  # not this product: listed first, ignored
+    gw.seed("sub_paid_no_webhook_yet", status="active", price="price_pro")
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    assert res.status_code == 409, res.text
+    assert res.json()["error"]["code"] == "subscription_exists"
+    assert _created(gw) == []
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_an_open_session_for_this_product_is_reused(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _set_customer(db_session, admin["org_id"], "cus_test123")
+    gw.open_sessions.append({"customer": "cus_test123", "url": "https://checkout.stripe.test/open-ent",
+                             "metadata": {"org_id": admin["org_id"], "price_id": "price_ent"}})
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    assert res.status_code == 200, res.text
+    assert res.json() == {"url": "https://checkout.stripe.test/open-ent"}
+    assert _created(gw) == []
+    db_session.expire_all()
+    reused = (await db_session.execute(select(AuditEvent).where(
+        AuditEvent.org_id == uuid.UUID(admin["org_id"]), AuditEvent.action == "billing_checkout_reused"))).scalars().all()
+    assert len(reused) == 1
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_two_sequential_checkouts_create_one_session(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    for _ in range(2):
+        res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+        assert res.status_code == 200, res.text
+    assert len(_created(gw)) == 1
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_an_org_without_a_customer_lists_nothing_and_creates(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    assert res.status_code == 200, res.text
+    assert len(_created(gw)) == 1
+    assert not [c for c in gw.calls if c[0] in ("list_subscriptions", "list_open_checkout_sessions")]
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_a_stripe_list_error_is_502_and_creates_nothing(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _set_customer(db_session, admin["org_id"], "cus_test123")
+    gw.fail_list = True
+    res = await client.post(_checkout_url(admin), headers=admin["headers"], json={"price_id": "price_pro"})
+    assert res.status_code == 502, res.text
+    assert res.json()["error"]["code"] == "stripe_unavailable"
+    assert _created(gw) == []
+
+
+@pytest.mark.asyncio
+async def test_bug08_f1_activating_a_different_subscription_while_one_is_live_fails_loud(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    first = await _activate_seeded(client, gw, admin, "evt_f1live")
+    gw.seed("sub_evt_f1dup")
+    res = await _post(client, _checkout_event("evt_f1dup", admin["org_id"]))
+    assert res.status_code == 500, res.text
+    assert res.json()["error"] == {"code": "activation_failed", "message": "conflicting_subscription"}
+    assert (await _row(db_session, admin["org_id"])).stripe_subscription_id == first
+    assert await db_session.get(StripeEvent, "evt_f1dup") is None
+
+
+def test_bug08_f1_the_real_gateway_takes_cards_only(monkeypatch):
+    seen = _capture(monkeypatch, _stripe.checkout.Session, "create", _types.SimpleNamespace(url="https://checkout.stripe.test/s"))
+    StripeGateway(get_settings()).create_checkout_session(
+        customer_id="cus_1", price_id="price_pro", success_url="http://s", cancel_url="http://c", metadata={"org_id": "o"}
+    )
+    assert seen.get("payment_method_types") == ["card"]
+
+
+class _Pages:
+    """A Stripe list result: auto_paging_iter() walks every page; the first page alone does not."""
+
+    def __init__(self, *pages):
+        self.pages = pages
+        self.data = list(pages[0])
+
+    def auto_paging_iter(self):
+        for page in self.pages:
+            yield from page
+
+
+class _Obj(dict):
+    def to_dict(self):
+        return dict(self)
+
+
+def test_bug08_f1_the_real_gateway_lists_every_page_of_subscriptions_and_open_sessions(monkeypatch):
+    sub_seen = _capture(monkeypatch, _stripe.Subscription, "list",
+                        _Pages([_Obj(id="sub_1", status="canceled")], [_Obj(id="sub_2", status="active")]))
+    ses_seen = _capture(monkeypatch, _stripe.checkout.Session, "list",
+                        _Pages([], [_Obj(id="cs_2", url="https://checkout.stripe.test/2", metadata={"price_id": "price_pro"})]))
+    gw = StripeGateway(get_settings())
+    assert hasattr(gw, "list_subscriptions") and hasattr(gw, "list_open_checkout_sessions")
+    assert [s["id"] for s in gw.list_subscriptions("cus_1")] == ["sub_1", "sub_2"]
+    assert sub_seen["customer"] == "cus_1" and sub_seen["status"] == "all"
+    assert gw.list_open_checkout_sessions("cus_1") == [{"url": "https://checkout.stripe.test/2", "metadata": {"price_id": "price_pro"}}]
+    assert ses_seen["customer"] == "cus_1" and ses_seen["status"] == "open"
+
+
+def test_bug08_the_real_gateway_retrieves_a_subscription_as_a_dict(monkeypatch):
+    monkeypatch.setattr(_stripe.Subscription, "retrieve", lambda sid: _Obj(id=sid, status="active"))
+    gw = StripeGateway(get_settings())
+    assert hasattr(gw, "retrieve_subscription")
+    assert gw.retrieve_subscription("sub_9") == {"id": "sub_9", "status": "active"}
+
+
+# --- F2: Stripe's current state wins over the event body ---------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_created", [False, True])
+async def test_bug08_f2_a_stale_active_update_after_cancel_stays_cancelled(client, db_session, admin, billing_settings, same_created):
+    gw = billing_settings
+    sub = await _activate_seeded(client, gw, admin, "evt_f2c", period_end=FUTURE)
+    gw.seed(sub, status="canceled", period_end=FUTURE)
+    stamp = {"created": 1_760_000_000} if same_created else {}
+    deleted = {**_deleted_event("evt_f2c_del", sub, status="canceled"), **stamp}
+    stale = {**_updated_event("evt_f2c_stale", sub, status="active", current_period_end=FUTURE), **stamp}
+    assert (await _post(client, deleted)).status_code == 200
+    assert (await _post(client, stale)).status_code == 200
+    assert (await _row(db_session, admin["org_id"])).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bug08_f2_a_cancel_flag_update_after_a_renewal_keeps_stripes_period_and_flag(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    sub = await _activate_seeded(client, gw, admin, "evt_f2r", period_end=FUTURE)
+    gw.seed(sub, period_end=LATER, cancel=True)  # renewed, then set to cancel at the (new) period end
+    renewal = _updated_event("evt_f2r_renew", sub, status="active", cancel_at_period_end=False,
+                             items={"data": [{"price": {"id": "price_pro"}, "current_period_end": LATER}]})
+    old_flag = _updated_event("evt_f2r_flag", sub, status="active", cancel_at_period_end=True,
+                              items={"data": [{"price": {"id": "price_pro"}, "current_period_end": FUTURE}]})
+    assert (await _post(client, renewal)).status_code == 200
+    assert (await _post(client, old_flag)).status_code == 200  # an older snapshot delivered last
+    row = await _row(db_session, admin["org_id"])
+    assert _epoch(row.current_period_end) == LATER
+    assert row.cancel_at_period_end is True
+
+
+@pytest.mark.asyncio
+async def test_bug08_f2_a_late_checkout_for_a_cancelled_subscription_lands_cancelled(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    gw.seed("sub_evt_f2late", status="canceled", period_end=PAST)
+    assert (await _post(client, _checkout_event("evt_f2late", admin["org_id"]))).status_code == 200
+    assert (await _row(db_session, admin["org_id"])).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bug08_f2_stripe_unreachable_on_an_update_is_500_with_no_effect(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    sub = await _activate_seeded(client, gw, admin, "evt_f2down")
+    gw.fail_retrieve = True
+    res = await _post(client, _updated_event("evt_f2down_upd", sub, status="past_due"))
+    assert res.status_code == 500, res.text
+    assert res.json()["error"] == {"code": "activation_failed", "message": "stripe_unavailable"}
+    assert (await _row(db_session, admin["org_id"])).status == "active"
+    assert await db_session.get(StripeEvent, "evt_f2down_upd") is None
+    updated = (await db_session.execute(select(AuditEvent).where(
+        AuditEvent.org_id == uuid.UUID(admin["org_id"]), AuditEvent.action == "billing_subscription_updated"))).scalars().all()
+    assert updated == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", [{"customer": "cus_someone_else"}, {"price": "price_cloud"}])
+async def test_bug08_f2_a_retrieved_subscription_that_is_not_ours_is_refused(client, db_session, admin, billing_settings, mismatch):
+    gw = billing_settings
+    sub = await _activate_seeded(client, gw, admin, "evt_f2mis")
+    gw.seed(sub, status="past_due", **mismatch)
+    res = await _post(client, _updated_event("evt_f2mis_upd", sub, status="past_due"))
+    assert res.status_code == 500, res.text
+    assert res.json()["error"] == {"code": "activation_failed", "message": "stripe_mismatch"}
+    assert (await _row(db_session, admin["org_id"])).status == "active"
+    assert await db_session.get(StripeEvent, "evt_f2mis_upd") is None
+
+
+STRIPE_TO_UAM = {"active": "active", "trialing": "trialing", "past_due": "past_due", "unpaid": "past_due",
+                 "incomplete": "past_due", "paused": "past_due", "canceled": "cancelled", "incomplete_expired": "cancelled"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stripe_status", list(STRIPE_TO_UAM))
+async def test_bug08_f2_every_stripe_status_lands_on_its_uam_status(client, db_session, admin, billing_settings, stripe_status):
+    gw = billing_settings
+    sub = await _activate_seeded(client, gw, admin, "evt_f2s")
+    gw.seed(sub, status=stripe_status)
+    # The body says "active" whatever Stripe now reports: only the retrieved status may count.
+    assert (await _post(client, _updated_event("evt_f2s_upd", sub, status="active"))).status_code == 200
+    assert (await _row(db_session, admin["org_id"])).status == STRIPE_TO_UAM[stripe_status]
+
+
+# --- F3: a replacement subscription carries its own period ------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_bug08_f3_a_resubscription_after_expiry_carries_its_own_period_and_is_paid_at_once(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _put_row(db_session, admin["org_id"], "sub_old", status="cancelled", period_end=PAST, cancel=True)
+    gw.seed("sub_evt_f3new", status="active", period_end=FUTURE)  # no cancel flag in Stripe's answer
+    assert (await _post(client, _checkout_event("evt_f3new", admin["org_id"]))).status_code == 200
+    row = await _row(db_session, admin["org_id"])
+    assert row.stripe_subscription_id == "sub_evt_f3new"
+    assert row.status == "active"
+    assert row.current_period_end is not None and _epoch(row.current_period_end) == FUTURE
+    assert row.cancel_at_period_end is False
+    summary = (await client.get(f"/api/v1/orgs/{admin['org_id']}/billing", headers=admin["headers"])).json()["subscriptions"][0]
+    assert summary["status"] == "active" and summary["cancel_at_period_end"] is False
+    settings = get_settings()
+    ent = await EntitlementService(db_session, settings, AuditService(db_session, settings)).resolve(admin["org_id"], "devgenie")
+    assert ent.tier == "pro"  # the internal entitlement answer (by-subject resolves through this) is paid at once
+
+
+@pytest.mark.asyncio
+async def test_bug08_f3_a_later_event_for_the_replaced_subscription_is_unknown(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _put_row(db_session, admin["org_id"], "sub_old", status="cancelled", period_end=PAST, cancel=True)
+    gw.seed("sub_evt_f3rep", status="active", period_end=FUTURE)
+    assert (await _post(client, _checkout_event("evt_f3rep", admin["org_id"]))).status_code == 200
+    gw.seed("sub_old", status="active")
+    res = await _post(client, _updated_event("evt_f3_old", "sub_old", status="active"))
+    assert res.status_code == 500 and res.json()["error"]["message"] == "unknown_subscription"
+
+
+@pytest.mark.asyncio
+async def test_bug08_f3_a_replacement_with_no_period_has_none(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _put_row(db_session, admin["org_id"], "sub_old", status="cancelled", period_end=PAST, cancel=True)
+    gw.seed("sub_evt_f3none", status="active")
+    assert (await _post(client, _checkout_event("evt_f3none", admin["org_id"]))).status_code == 200
+    assert (await _row(db_session, admin["org_id"])).current_period_end is None
+
+
+@pytest.mark.asyncio
+async def test_bug08_f3_a_same_id_reactivation_with_no_period_keeps_the_stored_period(client, db_session, admin, billing_settings):
+    gw = billing_settings
+    await _put_row(db_session, admin["org_id"], "sub_evt_f3same", status="active", period_end=FUTURE, cancel=False)
+    gw.seed("sub_evt_f3same", status="active")
+    assert (await _post(client, _checkout_event("evt_f3same", admin["org_id"]))).status_code == 200
+    row = await _row(db_session, admin["org_id"])
+    assert _epoch(row.current_period_end) == FUTURE

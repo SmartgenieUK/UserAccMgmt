@@ -129,11 +129,7 @@ def test_a_malformed_price_map_entry_fails_loud(monkeypatch):
 
 @pytest.fixture
 def gateway(billing_settings):
-    from app.core.config import get_settings
-
-    fake = FakeStripeGateway(get_settings())
-    app.dependency_overrides[get_stripe_gateway] = lambda: fake
-    return fake
+    return billing_settings  # the same per-test gateway every request sees (BUG-08)
 
 
 def _portal_url(admin):

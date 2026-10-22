@@ -41,6 +41,16 @@ class FakeStripeGateway(StripeGateway):
     def create_portal_session(self, customer_id, return_url, cancel_subscription_id=None) -> str:
         return "https://portal.stripe.test/session"
 
+    # BUG-08: the checkout guard asks Stripe what the customer already has; these accounts have nothing yet.
+    def retrieve_subscription(self, subscription_id) -> dict:
+        raise AssertionError("no subscription is retrieved in these tests")
+
+    def list_subscriptions(self, customer_id) -> list:
+        return []
+
+    def list_open_checkout_sessions(self, customer_id) -> list:
+        return []
+
 
 @pytest.fixture()
 def env(client, fake_redis, rsa_keypair, monkeypatch):
