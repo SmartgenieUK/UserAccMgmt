@@ -15,9 +15,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
-from app.main import app
-from app.services.stripe_gateway import get_stripe_gateway
-from tests.test_billing import FakeStripeGateway, _checkout_event, _post, admin, billing_settings  # noqa: F401
+from tests.test_billing import _checkout_event, _post, admin, billing_settings  # noqa: F401
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "stripe_subscription_updated_2026-03-25.json").read_text())
 PERIOD_END = datetime.fromtimestamp(FIXTURE["data"]["object"]["items"]["data"][0]["current_period_end"], tz=timezone.utc)
@@ -38,7 +36,8 @@ def _item_period_end(event, ts):
     return event
 
 
-async def _activate(client, admin, event_id):
+async def _activate(client, admin, event_id, gw):
+    gw.seed("sub_" + event_id)  # Stripe's state for the new subscription (BUG-08: activation retrieves it)
     assert (await _post(client, _checkout_event(event_id, admin["org_id"]))).status_code == 200
     return "sub_" + event_id
 
@@ -61,7 +60,7 @@ def _ts(iso):
 
 @pytest.mark.asyncio
 async def test_a_new_subscription_is_not_ending(client, db_session, admin, billing_settings):
-    await _activate(client, admin, "evt_p1")
+    await _activate(client, admin, "evt_p1", billing_settings)
     ent = await _entitlement(client, admin)
     assert ent["tier"] == "pro"
     assert ent["cancel_at_period_end"] is False
@@ -70,7 +69,8 @@ async def test_a_new_subscription_is_not_ending(client, db_session, admin, billi
 
 @pytest.mark.asyncio
 async def test_the_period_end_is_read_from_the_subscription_item(client, db_session, admin, billing_settings):
-    sub = await _activate(client, admin, "evt_p2")
+    sub = await _activate(client, admin, "evt_p2", billing_settings)
+    billing_settings.seed(sub, period_end=int(PERIOD_END.timestamp()), cancel=False)
     assert (await _post(client, _updated("evt_p2_upd", sub, cancel_at_period_end=False))).status_code == 200
     ent = await _entitlement(client, admin)
     assert ent["tier"] == "pro"
@@ -80,7 +80,8 @@ async def test_the_period_end_is_read_from_the_subscription_item(client, db_sess
 
 @pytest.mark.asyncio
 async def test_the_top_level_period_end_is_the_fallback(client, db_session, admin, billing_settings):
-    sub = await _activate(client, admin, "evt_p3")
+    sub = await _activate(client, admin, "evt_p3", billing_settings)
+    billing_settings.seed(sub, top_period_end=int(PERIOD_END.timestamp()), cancel=False)
     event = _updated("evt_p3_upd", sub, cancel_at_period_end=False, current_period_end=int(PERIOD_END.timestamp()))
     del event["data"]["object"]["items"]["data"][0]["current_period_end"]
     assert (await _post(client, event)).status_code == 200
@@ -89,10 +90,12 @@ async def test_the_top_level_period_end_is_the_fallback(client, db_session, admi
 
 @pytest.mark.asyncio
 async def test_a_renewal_moves_the_period_end_so_a_paying_customer_stays_pro(client, db_session, admin, billing_settings):
-    sub = await _activate(client, admin, "evt_p4")
+    sub = await _activate(client, admin, "evt_p4", billing_settings)
     past = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+    billing_settings.seed(sub, period_end=past, cancel=False)
     assert (await _post(client, _item_period_end(_updated("evt_p4_a", sub, cancel_at_period_end=False), past))).status_code == 200
     assert (await _entitlement(client, admin))["tier"] == "lite"  # a lapsed period does not entitle
+    billing_settings.seed(sub, period_end=int(PERIOD_END.timestamp()), cancel=False)
     assert (await _post(client, _updated("evt_p4_b", sub, cancel_at_period_end=False))).status_code == 200
     ent = await _entitlement(client, admin)
     assert ent["tier"] == "pro"
@@ -101,12 +104,14 @@ async def test_a_renewal_moves_the_period_end_so_a_paying_customer_stays_pro(cli
 
 @pytest.mark.asyncio
 async def test_cancel_at_period_end_is_stored_shown_and_can_be_undone(client, db_session, admin, billing_settings):
-    sub = await _activate(client, admin, "evt_p5")
+    sub = await _activate(client, admin, "evt_p5", billing_settings)
+    billing_settings.seed(sub, period_end=int(PERIOD_END.timestamp()), cancel=True)
     assert (await _post(client, _updated("evt_p5_cancel", sub))).status_code == 200  # the fixture: pending cancel
     ent = await _entitlement(client, admin)
     assert ent["tier"] == "pro" and ent["status"] == "active"  # still paid until the period ends
     assert ent["cancel_at_period_end"] is True
     assert (await _billing(client, admin))["cancel_at_period_end"] is True
+    billing_settings.seed(sub, period_end=int(PERIOD_END.timestamp()), cancel=False)
     assert (await _post(client, _updated("evt_p5_resume", sub, cancel_at_period_end=False))).status_code == 200
     assert (await _entitlement(client, admin))["cancel_at_period_end"] is False
 
@@ -138,7 +143,7 @@ def _portal_url(admin):
 
 @pytest.mark.asyncio
 async def test_the_cancel_flow_opens_stripes_cancel_confirmation_for_the_orgs_subscription(client, db_session, admin, gateway):
-    sub = await _activate(client, admin, "evt_p6")
+    sub = await _activate(client, admin, "evt_p6", gateway)
     res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
     assert res.status_code == 200, res.text
     assert gateway.calls[-1] == ("create_portal_session", "cus_test123", sub)
@@ -146,7 +151,7 @@ async def test_the_cancel_flow_opens_stripes_cancel_confirmation_for_the_orgs_su
 
 @pytest.mark.asyncio
 async def test_without_a_flow_the_portal_session_is_unchanged(client, db_session, admin, gateway):
-    await _activate(client, admin, "evt_p7")
+    await _activate(client, admin, "evt_p7", gateway)
     res = await client.post(_portal_url(admin), headers=admin["headers"])
     assert res.status_code == 200, res.text
     assert gateway.calls[-1] == ("create_portal_session", "cus_test123", None)
@@ -163,7 +168,7 @@ async def test_the_cancel_flow_without_a_subscription_is_refused(client, db_sess
 
 @pytest.mark.asyncio
 async def test_an_unknown_flow_is_refused(client, db_session, admin, gateway):
-    await _activate(client, admin, "evt_p8")
+    await _activate(client, admin, "evt_p8", gateway)
     res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "upgrade"})
     assert res.status_code == 422
     assert len([c for c in gateway.calls if c[0] == "create_portal_session"]) == 0
@@ -192,7 +197,7 @@ def test_the_gateway_sends_stripe_the_cancel_flow(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_cancel_flow_needs_a_product(client, db_session, admin, gateway):
-    await _activate(client, admin, "evt_p9")
+    await _activate(client, admin, "evt_p9", gateway)
     res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel"})
     assert res.status_code == 422
     assert not [c for c in gateway.calls if c[0] == "create_portal_session"]
@@ -226,7 +231,7 @@ async def test_the_cancel_flow_picks_this_products_live_subscription(client, db_
     res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
     assert res.status_code == 422 and res.json()["error"]["code"] == "no_subscription"  # nothing live for devgenie yet
 
-    await _activate(client, admin, "evt_p10")  # the live devgenie subscription: sub_evt_p10
+    await _activate(client, admin, "evt_p10", gateway)  # the live devgenie subscription: sub_evt_p10
     res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
     assert res.status_code == 200, res.text
     assert gateway.calls[-1] == ("create_portal_session", "cus_test123", "sub_evt_p10")
@@ -234,7 +239,8 @@ async def test_the_cancel_flow_picks_this_products_live_subscription(client, db_
 
 @pytest.mark.asyncio
 async def test_a_cancelled_subscription_is_not_offered_the_cancel_flow(client, db_session, admin, gateway):
-    sub = await _activate(client, admin, "evt_p11")
+    sub = await _activate(client, admin, "evt_p11", gateway)
+    gateway.seed(sub, status="canceled", cancel=False)
     assert (await _post(client, _updated("evt_p11_gone", sub, status="canceled", cancel_at_period_end=False))).status_code == 200
     res = await client.post(_portal_url(admin), headers=admin["headers"], json={"flow": "cancel", "product": "devgenie"})
     assert res.status_code == 422 and res.json()["error"]["code"] == "no_subscription"

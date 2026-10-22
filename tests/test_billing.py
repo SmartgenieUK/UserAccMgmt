@@ -205,6 +205,7 @@ async def test_webhook_bad_signature_rejected(client, db_session, billing_settin
 
 @pytest.mark.asyncio
 async def test_webhook_checkout_completed_activates_subscription(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_test1")
     event_dict = {
         "id": "evt_1",
         "type": "checkout.session.completed",
@@ -237,6 +238,7 @@ async def test_webhook_checkout_completed_activates_subscription(client, db_sess
 
 @pytest.mark.asyncio
 async def test_webhook_is_idempotent(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_test1")
     event_dict = {
         "id": "evt_2",
         "type": "checkout.session.completed",
@@ -265,6 +267,7 @@ async def test_webhook_is_idempotent(client, db_session, admin, billing_settings
 
 @pytest.mark.asyncio
 async def test_webhook_subscription_deleted_falls_back_to_lite(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_test2")
     # first complete checkout
     event_dict = {
         "id": "evt_3",
@@ -286,6 +289,7 @@ async def test_webhook_subscription_deleted_falls_back_to_lite(client, db_sessio
     await client.post("/webhooks/stripe", content=payload, headers={"Stripe-Signature": sig, "content-type": "application/json"})
 
     # then delete
+    billing_settings.seed("sub_test2", status="canceled")
     del_event_dict = {
         "id": "evt_4",
         "type": "customer.subscription.deleted",
@@ -309,6 +313,7 @@ async def test_webhook_subscription_deleted_falls_back_to_lite(client, db_sessio
 
 @pytest.mark.asyncio
 async def test_client_cannot_declare_tier(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_test3")
     event_dict = {
         "id": "evt_5",
         "type": "checkout.session.completed",
@@ -339,6 +344,7 @@ async def test_client_cannot_declare_tier(client, db_session, admin, billing_set
 
 @pytest.mark.asyncio
 async def test_webhook_subscription_updated_past_due_falls_back_to_lite(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_upd1")
     # Activate pro subscription
     checkout_event = {
         "id": "evt_upd1_chk",
@@ -361,6 +367,7 @@ async def test_webhook_subscription_updated_past_due_falls_back_to_lite(client, 
     assert res.status_code == 200
 
     # Post customer.subscription.updated with status: past_due
+    billing_settings.seed("sub_upd1", status="past_due", period_end=int(time.time()) + 86400)
     update_event = {
         "id": "evt_upd1_upd",
         "type": "customer.subscription.updated",
@@ -391,6 +398,7 @@ async def test_webhook_subscription_updated_past_due_falls_back_to_lite(client, 
 
 @pytest.mark.asyncio
 async def test_webhook_subscription_updated_price_change_changes_tier(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_upd2")
     # Activate pro subscription
     checkout_event = {
         "id": "evt_upd2_chk",
@@ -414,6 +422,7 @@ async def test_webhook_subscription_updated_price_change_changes_tier(client, db
 
     # Post update with price_ent, status active, future current_period_end
     future_ts = int(time.time()) + 86400
+    billing_settings.seed("sub_upd2", price="price_ent", period_end=future_ts)
     update_event = {
         "id": "evt_upd2_upd",
         "type": "customer.subscription.updated",
@@ -439,6 +448,7 @@ async def test_webhook_subscription_updated_price_change_changes_tier(client, db
 
 @pytest.mark.asyncio
 async def test_webhook_subscription_updated_period_end_in_past_is_lite(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_upd3")
     # Activate pro subscription
     checkout_event = {
         "id": "evt_upd3_chk",
@@ -462,6 +472,7 @@ async def test_webhook_subscription_updated_period_end_in_past_is_lite(client, d
 
     # Post update with status active but current_period_end in the past
     past_ts = int(time.time()) - 86400
+    billing_settings.seed("sub_upd3", top_period_end=past_ts)
     update_event = {
         "id": "evt_upd3_upd",
         "type": "customer.subscription.updated",
@@ -487,6 +498,7 @@ async def test_webhook_subscription_updated_period_end_in_past_is_lite(client, d
 
 @pytest.mark.asyncio
 async def test_billing_webhook_writes_audit_event(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_upd4")
     # Initial checkout.session.completed
     checkout_event = {
         "id": "evt_upd4_chk",
@@ -640,28 +652,37 @@ async def _set_customer(db_session, org_id, customer_id):
     await db_session.commit()
 
 
-# Each case: (reason, bad event fields, setup before the bad post, good event fields, correction before replay).
-def _no_op(admin, db_session):
+# BUG-08 F4: Stripe retries the SAME bytes under the same event id. A case is either repairable on the server
+# (the identical replay then activates exactly once) or irreparable (the identical replay stays refused).
+# Each case: (event fields given the org id, setup before the first delivery, server repair before the replay).
+def _no_op(ctx):
     return None
 
 
-FAIL_CASES = {
-    "unknown_price": (lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_new"}}, _no_op,
-                      lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_new"}},
-                      lambda a, db: _with_price("price_new", "devgenie:pro")),
-    "unknown_plan": (lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_gold"}},
-                     lambda a, db: _with_price("price_gold", "devgenie:gold"),
-                     lambda a: {"metadata": {"org_id": a["org_id"], "price_id": "price_gold"}},
-                     lambda a, db: _with_price("price_gold", "devgenie:pro")),
-    "missing_org": (lambda a: {"metadata": {"price_id": "price_pro"}}, _no_op, lambda a: {}, _no_op),
-    "unknown_org": (lambda a: {"metadata": {"org_id": str(uuid.uuid4()), "price_id": "price_pro"}}, _no_op,
-                    lambda a: {}, _no_op),
-    "missing_customer": (lambda a: {"customer": None}, _no_op, lambda a: {}, _no_op),
-    "missing_subscription": (lambda a: {"subscription": None}, _no_op, lambda a: {}, _no_op),
-    "unpaid_session": (lambda a: {"payment_status": "unpaid"}, _no_op, lambda a: {}, _no_op),
-    "customer_mismatch": (lambda a: {}, lambda a, db: _set_customer(db, a["org_id"], "cus_other"),
-                          lambda a: {"customer": "cus_other"}, _no_op),
+async def _create_org(ctx):
+    ctx["db"].add(Organization(id=uuid.UUID(ctx["org_id"]), name="Late", slug="late-" + ctx["org_id"][:8]))
+    await ctx["db"].commit()
+
+
+REPAIRABLE = {
+    "unknown_price": (lambda org: {"metadata": {"org_id": org, "price_id": "price_new"}}, _no_op,
+                      lambda ctx: _with_price("price_new", "devgenie:pro")),
+    "unknown_plan": (lambda org: {"metadata": {"org_id": org, "price_id": "price_gold"}},
+                     lambda ctx: _with_price("price_gold", "devgenie:gold"),
+                     lambda ctx: _with_price("price_gold", "devgenie:pro")),
+    "unknown_org": (lambda org: {}, _no_op, _create_org),
+    # Stripe had no answer for the subscription the first time; once it does, the same bytes activate.
+    "stripe_unavailable": (lambda org: {}, lambda ctx: ctx["gw"].subscriptions_by_id.clear(),
+                           lambda ctx: ctx["gw"].seed(ctx["sub"])),
 }
+IRREPARABLE = {
+    "missing_org": (lambda org: {"metadata": {"price_id": "price_pro"}}, _no_op),
+    "missing_customer": (lambda org: {"customer": None}, _no_op),
+    "missing_subscription": (lambda org: {"subscription": None}, _no_op),
+    "unpaid_session": (lambda org: {"payment_status": "unpaid"}, _no_op),
+    "customer_mismatch": (lambda org: {}, lambda ctx: _set_customer(ctx["db"], ctx["org_id"], "cus_other")),
+}
+FAIL_CASES = {**REPAIRABLE, **IRREPARABLE}
 
 
 async def _maybe_await(value):
@@ -679,37 +700,59 @@ async def _activated_audits(db_session, org_id):
         AuditEvent.org_id == uuid.UUID(org_id), AuditEvent.action == "billing_subscription_activated"))).scalars().all()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reason", list(FAIL_CASES))
-async def test_checkout_that_cannot_activate_fails_loud_and_the_retry_activates_once(client, db_session, admin, billing_settings, reason):
-    bad, setup, good, correct = FAIL_CASES[reason]
-    event_id = "evt_fail_" + reason
-    await _maybe_await(setup(admin, db_session))
-
-    first = _checkout_event(event_id, admin["org_id"], **bad(admin))
-    res = await _post(client, first)
+async def _deliver_refused(client, db_session, ctx, event, reason):
+    res = await _post(client, event)
     assert res.status_code == 500, res.text
     assert res.json()["error"] == {"code": "activation_failed", "message": reason}
     db_session.expire_all()
-    assert await db_session.get(StripeEvent, event_id) is None  # not marked processed: the retry is not skipped
-    assert await _devgenie_subs(db_session, admin["org_id"]) == []
+    assert await db_session.get(StripeEvent, event["id"]) is None  # not marked processed: the retry is not skipped
+    assert await _devgenie_subs(db_session, ctx["org_id"]) == []
 
-    await _maybe_await(correct(admin, db_session))
-    replay = _checkout_event(event_id, admin["org_id"], **good(admin))
-    # BUG-08 F4: Stripe retries the SAME bytes under the same event id; a replay with a changed body proves nothing.
-    assert json.dumps(replay) == json.dumps(first), "the retry body differs from the first delivery"
-    for _ in range(2):  # Stripe's retry activates; a duplicate after success stays a harmless 200
-        res = await _post(client, replay)
+
+def _case_ctx(reason, admin, db_session, gateway):
+    org_id = str(uuid.UUID(int=0xB08)) if reason == "unknown_org" else admin["org_id"]
+    return {"org_id": org_id, "db": db_session, "gw": gateway, "sub": "sub_evt_fail_" + reason}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", list(REPAIRABLE))
+async def test_checkout_that_cannot_activate_fails_loud_and_the_identical_retry_activates_once(client, db_session, admin, billing_settings, reason):
+    fields, setup, repair = REPAIRABLE[reason]
+    ctx = _case_ctx(reason, admin, db_session, billing_settings)
+    billing_settings.seed(ctx["sub"])
+    await _maybe_await(setup(ctx))
+    event = _checkout_event("evt_fail_" + reason, ctx["org_id"], **fields(ctx["org_id"]))
+    first_bytes = sign(event)[0]
+    await _deliver_refused(client, db_session, ctx, event, reason)
+
+    await _maybe_await(repair(ctx))
+    assert sign(event)[0] == first_bytes  # the identical bytes, freshly signed
+    for _ in range(2):  # Stripe's retry activates; a third delivery after success is a harmless no-op
+        res = await _post(client, event)
         assert res.status_code == 200, res.text
     db_session.expire_all()
-    subs = await _devgenie_subs(db_session, admin["org_id"])
+    subs = await _devgenie_subs(db_session, ctx["org_id"])
     assert [(s.status, s.source) for s in subs] == [("active", "stripe")]
-    assert len(await _activated_audits(db_session, admin["org_id"])) == 1
-    assert await db_session.get(StripeEvent, event_id) is not None
+    assert len(await _activated_audits(db_session, ctx["org_id"])) == 1
+    assert await db_session.get(StripeEvent, event["id"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", list(IRREPARABLE))
+async def test_checkout_that_cannot_activate_stays_refused_on_identical_replay(client, db_session, admin, billing_settings, reason):
+    fields, setup = IRREPARABLE[reason]
+    ctx = _case_ctx(reason, admin, db_session, billing_settings)
+    billing_settings.seed(ctx["sub"])
+    await _maybe_await(setup(ctx))
+    event = _checkout_event("evt_fail_" + reason, ctx["org_id"], **fields(ctx["org_id"]))
+    for _ in range(2):  # the identical bytes, delivered again: still refused, still no effect
+        await _deliver_refused(client, db_session, ctx, event, reason)
+    assert await _activated_audits(db_session, ctx["org_id"]) == []
 
 
 @pytest.mark.asyncio
 async def test_a_fully_discounted_checkout_activates(client, db_session, admin, billing_settings):
+    billing_settings.seed("sub_evt_promo")
     res = await _post(client, _checkout_event("evt_promo", admin["org_id"], payment_status="no_payment_required"))
     assert res.status_code == 200, res.text
     assert [s.status for s in await _devgenie_subs(db_session, admin["org_id"])] == ["active"]
@@ -725,7 +768,9 @@ async def test_subscription_event_before_its_checkout_fails_loud_then_applies(cl
     db_session.expire_all()
     assert await db_session.get(StripeEvent, "evt_early") is None
 
+    billing_settings.seed("sub_evt_chk")
     assert (await _post(client, _checkout_event("evt_chk", admin["org_id"]))).status_code == 200
+    billing_settings.seed("sub_evt_chk", status="past_due" if event_type.endswith("updated") else "canceled")
     res = await _post(client, early)  # Stripe's retry, after the checkout landed
     assert res.status_code == 200, res.text
     db_session.expire_all()

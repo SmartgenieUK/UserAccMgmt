@@ -30,8 +30,23 @@ class StripeGateway:
             # Stripe's promotion-code box; codes and their rules live in the Stripe dashboard (BRIEF-019). No
             # payment_method_collection: a card is collected even on a 100%-off code.
             allow_promotion_codes=True,
+            # Cards only, so a checkout completes paid or unpaid at once: no delayed-payment events (BUG-08).
+            payment_method_types=["card"],
         )
         return session.url
+
+    # BUG-08: Stripe's current state. Each returns top-level dicts (to_dict() is shallow: read nested values by
+    # key) and raises on a Stripe error.
+    def retrieve_subscription(self, subscription_id: str) -> dict:
+        return stripe.Subscription.retrieve(subscription_id).to_dict()
+
+    def list_subscriptions(self, customer_id: str) -> list[dict]:
+        listing = stripe.Subscription.list(customer=customer_id, status="all", limit=100)
+        return [sub.to_dict() for sub in listing.auto_paging_iter()]
+
+    def list_open_checkout_sessions(self, customer_id: str) -> list[dict]:
+        listing = stripe.checkout.Session.list(customer=customer_id, status="open", limit=100)
+        return [{"url": s["url"], "metadata": dict(s["metadata"] or {})} for s in listing.auto_paging_iter()]
 
     def create_portal_session(self, customer_id: str, return_url: str, cancel_subscription_id: str | None = None) -> str:
         params = {"customer": customer_id, "return_url": return_url}
