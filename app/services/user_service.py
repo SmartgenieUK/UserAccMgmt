@@ -37,6 +37,8 @@ def validate_signup_profile(body) -> tuple[str | None, str | None]:
             raise ValidationError("The company name has a character that is not allowed.", code="company_name_invalid")
     url = _trimmed(body.get("linkedin_url"), "linkedin_url")
     if url is not None:
+        # A link copied from a browser often carries ?tracking or #anchor; keep only the page address.
+        url = url.split("?", 1)[0].split("#", 1)[0]
         if len(url) > LINKEDIN_MAX:
             raise ValidationError("The LinkedIn address is too long.", code="linkedin_url_too_long")
         if not _LINKEDIN.fullmatch(url):

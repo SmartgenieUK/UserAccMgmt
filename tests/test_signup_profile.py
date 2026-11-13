@@ -213,6 +213,8 @@ BAD_URLS = [
     "https://linkedin.com@evil.example/in/x",
     "https://evil@www.linkedin.com/in/x",
     "https://linkedin.com:8443/in/x",
+    "https://evil.example?https://www.linkedin.com/in/x",
+    "https://evil.example#https://www.linkedin.com/in/x",
     "https://ukk.linkedin.com/in/x",
     "https://u.linkedin.com/in/x",
     "https://evil.uk.linkedin.com/in/x",
@@ -220,8 +222,6 @@ BAD_URLS = [
     "https://www.linkedin.com/in/../x",
     "https://www.linkedin.com/in/a/b",
     "https://www.linkedin.com/jobs/x",
-    "https://www.linkedin.com/in/x?trk=1",
-    "https://www.linkedin.com/in/x#a",
     "https://www.linkedin.com/in/%2e%2e",
     "https://www.linkedin.com/in/a b",
     "https://www.linkedin.com" + chr(92) + "in" + chr(92) + "x",  # backslashes
@@ -377,3 +377,15 @@ async def test_s12_help_lists_the_route(client):
     assert res.status_code == 200
     listed = {(e["method"], e["path"]) for e in res.json()["endpoints"]["authenticated"]}
     assert ("PUT", f"{get_settings().API_V1_PREFIX}/me/signup-profile") in listed
+
+
+@pytest.mark.parametrize("url", ["https://www.linkedin.com/in/x?trk=1", "https://www.linkedin.com/in/x#a", "https://www.linkedin.com/in/x/?utm_source=share&a=b#c"])
+async def test_s3_a_copied_tracking_tail_is_dropped(client, db_session, url):
+    # Co-arch acceptance of BRIEF-174: a link copied from a browser is accepted and stored without its ?/# tail.
+    user, org = await _user(db_session, "s3t@example.com", "s3t-org")
+    res = await _put(client, user, org, {"linkedin_url": url})
+    assert res.status_code == 200, res.text
+    stored = res.json()["linkedin_url"]
+    assert stored in ("https://www.linkedin.com/in/x", "https://www.linkedin.com/in/x/")
+    await db_session.refresh(user)
+    assert user.linkedin_url == stored
