@@ -4,8 +4,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # CR-020 Lite sign-up: an optional company name and LinkedIn URL on the account (self-reported, never enriched).
-revision = "20261113_000006"
-down_revision = "20260914_000005"
+revision = "20261113_000007"
+down_revision = "20261021_000006"
 branch_labels = None
 depends_on = None
 

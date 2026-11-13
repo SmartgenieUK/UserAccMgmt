@@ -330,19 +330,19 @@ async def test_s10_the_entra_claims_answer_is_byte_identical(entra_client, db_se
 
 # --- S11 the migration matches the model ---------------------------------------------------------------------
 
-REVISION = "20261113_000006"
-PREVIOUS = "20260914_000005"
+REVISION = "20261113_000007"
+PREVIOUS = "20261021_000006"
 
 
 def _migration():
-    path = ROOT / "alembic" / "versions" / "20261113_000006_user_company_linkedin.py"
+    path = ROOT / "alembic" / "versions" / "20261113_000007_user_company_linkedin.py"
     spec = importlib.util.spec_from_file_location("mig_user_company_linkedin", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_s11_one_head_and_it_follows_the_stripe_revision():
+def test_s11_one_head_and_it_follows_the_live_cancel_revision():
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
