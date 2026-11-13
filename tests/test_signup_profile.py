@@ -129,6 +129,8 @@ async def test_s3_set_trim_and_read_back(client, db_session):
     [
         "https://WWW.LinkedIn.com/company/acme-ltd/",
         "https://linkedin.com/in/a-b-9",
+        "https://uk.linkedin.com/in/x",  # country subdomain (co-arch acceptance)
+        "https://www.linkedin.com/in/a_b",  # underscore slug (co-arch acceptance)
         "https://www.linkedin.com/in/" + "a" * 227,  # exactly 255 characters
     ],
 )
@@ -211,7 +213,9 @@ BAD_URLS = [
     "https://linkedin.com@evil.example/in/x",
     "https://evil@www.linkedin.com/in/x",
     "https://linkedin.com:8443/in/x",
-    "https://uk.linkedin.com/in/x",
+    "https://ukk.linkedin.com/in/x",
+    "https://u.linkedin.com/in/x",
+    "https://evil.uk.linkedin.com/in/x",
     "https://www.linkedin.com/in/",
     "https://www.linkedin.com/in/../x",
     "https://www.linkedin.com/in/a/b",
@@ -219,7 +223,6 @@ BAD_URLS = [
     "https://www.linkedin.com/in/x?trk=1",
     "https://www.linkedin.com/in/x#a",
     "https://www.linkedin.com/in/%2e%2e",
-    "https://www.linkedin.com/in/a_b",
     "https://www.linkedin.com/in/a b",
     "https://www.linkedin.com" + chr(92) + "in" + chr(92) + "x",  # backslashes
     "https://www.linkedin.com./in/x",

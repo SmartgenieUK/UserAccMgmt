@@ -14,7 +14,7 @@ COMPANY_MAX = 120
 LINKEDIN_MAX = 255
 # The whole LinkedIn rule: https, host exactly linkedin.com or www.linkedin.com (ASCII case folding only), a /in/ or
 # /company/ path with one plain slug, no userinfo, port, query, fragment or escapes. No network check.
-_LINKEDIN = re.compile(r"(?i:https://(?:www\.)?linkedin\.com)/(?:in|company)/[A-Za-z0-9-]+/?", re.ASCII)
+_LINKEDIN = re.compile(r"(?i:https://(?:www\.|[a-z]{2}\.)?linkedin\.com)/(?:in|company)/[A-Za-z0-9_-]+/?", re.ASCII)
 
 
 def _trimmed(value, field: str) -> str | None:
