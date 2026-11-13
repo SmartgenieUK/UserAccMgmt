@@ -18,6 +18,8 @@ class User(Base):
     avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     locale: Mapped[str | None] = mapped_column(String(32), nullable=True)
     timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    company_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    linkedin_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     custom_fields: Mapped[dict] = mapped_column(JSONB_TYPE, default=dict, nullable=False)

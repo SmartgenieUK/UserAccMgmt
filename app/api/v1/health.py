@@ -143,6 +143,12 @@ async def api_help(settings=Depends(get_settings)):
                     "body": {"display_name": "string|null"},
                 },
                 {
+                    "method": "PUT",
+                    "path": f"{base}/me/signup-profile",
+                    "description": "Set or clear the optional company name and LinkedIn URL (a missing or empty value clears it)",
+                    "body": {"company_name": "string|null", "linkedin_url": "string|null"},
+                },
+                {
                     "method": "DELETE",
                     "path": f"{base}/me",
                     "description": "Deactivate current user account",

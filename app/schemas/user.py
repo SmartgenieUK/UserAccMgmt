@@ -14,6 +14,8 @@ class UserRead(APIModel):
     avatar_url: str | None
     locale: str | None
     timezone: str | None
+    company_name: str | None
+    linkedin_url: str | None
     is_active: bool
     is_verified: bool
     custom_fields: dict[str, Any]
@@ -29,3 +31,8 @@ class UserUpdate(APIModel):
     timezone: str | None = None
     custom_fields: dict[str, Any] | None = None
     custom_schema_version: int | None = None
+
+
+class SignupProfileRead(APIModel):
+    company_name: str | None
+    linkedin_url: str | None
