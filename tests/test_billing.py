@@ -1198,8 +1198,10 @@ async def test_bug08_f3_a_same_id_reactivation_with_no_period_keeps_the_stored_p
 
 # ---------------------------------------------------------------------------------------------------------
 # BRIEF-184 / XP-CR020-TESTER-CODES: W1-W6. These are RED-first witnesses, not a tester implementation.
-# StripeGateway and BillingService remain real. Only Stripe's SDK boundary is replaced; all uncaptured SDK
-# requests fail. The mutant catalogue is tests/fixtures/b184-mutants.json. No test runs a child process.
+# StripeGateway and BillingService remain real. Stripe's SDK boundary is replaced; PostgreSQL race
+# witnesses also wrap service methods with scheduling gates, always executing the original method.
+# All uncaptured SDK requests fail. The mutant catalogue is tests/fixtures/b184-mutants.json.
+# No test runs a child process. Select ALL W4 cases with -k tester_w4 (including PostgreSQL).
 # ---------------------------------------------------------------------------------------------------------
 import asyncio
 import copy
@@ -1396,9 +1398,11 @@ class _TesterStripeSDK:
                                 "current_period_end": end}]},
             "cancel_at": end, "cancel_at_period_end": False, "current_period_end": end,
             "metadata": copy.deepcopy(kwargs.get("metadata", {})),
-            "discounts": [{"id": "di_b184", "promotion_code": self.promo["id"],
-                           "coupon": copy.deepcopy(self.promo["coupon"])}],
-            "discount": {"promotion_code": self.promo["id"], "coupon": copy.deepcopy(self.promo["coupon"])},
+            "discounts": [{"id": "di_b184", **discount,
+                           "coupon": copy.deepcopy(self.promo["coupon"])}
+                          for discount in kwargs.get("discounts", [])],
+            "discount": ({**kwargs["discounts"][0], "coupon": copy.deepcopy(self.promo["coupon"])}
+                         if kwargs.get("discounts") else None),
             "collection_method": kwargs.get("collection_method"),
             "latest_invoice": {"id": "in_" + sid, "total": 0, "subtotal": 0, "amount_due": 0,
                                "amount_paid": 0, "amount_remaining": 0, "status": "paid",
@@ -2128,19 +2132,39 @@ async def tester_postgres_db(fake_redis):
         pytest.skip("W4 requires B184_TEST_DATABASE_URL to a disposable PostgreSQL DB; skip is not locking evidence")
     assert url.startswith("postgresql+asyncpg://"), "B184_TEST_DATABASE_URL must use postgresql+asyncpg"
     schema = "b184_" + uuid.uuid4().hex
-    engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
+    # Also bound driver/SQL waits: a failed witness must not hang in rollback or schema teardown.
+    engine = create_async_engine(
+        url, pool_size=5, max_overflow=0, pool_timeout=20,
+        connect_args={"command_timeout": 20, "server_settings": {
+            "search_path": schema, "lock_timeout": "15000", "statement_timeout": "20000",
+        }},
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     sessions = []
+
+    def create_tables(conn):
+        # Exercise the deployed reservation constraint, not just ORM metadata.
+        model = _tester_model()
+        Base.metadata.create_all(conn, tables=[t for t in Base.metadata.sorted_tables if t is not model.__table__])
+        cfg = Config(str(B184_ROOT / "alembic.ini"))
+        cfg.set_main_option("script_location", str(B184_ROOT / "alembic"))
+        migration = ScriptDirectory.from_config(cfg).get_revision("20261113_000008").module
+        with Operations.context(MigrationContext.configure(conn)):
+            migration.upgrade()
+
     try:
         async with engine.begin() as conn:
             await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(create_tables)
         async with factory() as session:
             session.add_all(Plan(**plan) for plan in DEFAULT_PLANS)
             await session.commit()
 
         async def per_request():
-            async with factory() as session:
+            # Pin a physical connection across the service's reservation commit/relock.
+            # Distinct Session objects alone do not prove distinct PostgreSQL backends.
+            async with engine.connect() as conn, factory(bind=conn) as session:
+                session.info["b184_pid"] = await session.scalar(sa.text("SELECT pg_backend_pid()"))
                 sessions.append(session)
                 yield session
 
@@ -2151,20 +2175,76 @@ async def tester_postgres_db(fake_redis):
     finally:
         app.dependency_overrides.pop(get_session, None)
         app.state.redis = None
-        async with engine.begin() as conn:
-            await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await engine.dispose()
+        try:
+            async with engine.begin() as conn:
+                await _tester_wait_for(
+                    conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')),
+                    "drop PostgreSQL witness schema",
+                )
+        finally:
+            await _tester_wait_for(engine.dispose(), "dispose PostgreSQL witness engine")
 
 
-@pytest.mark.parametrize("race", ["same-account", "last-slot", "same-user-two-orgs", "two-admins-one-org"])
-async def test_tester_postgres_w4_races(tester_postgres_db, tester_sdk, sent_otps, race):
+async def _tester_wait_for(awaitable, step, timeout=15):
+    """Bound the step itself, including when its cancellation takes too long."""
+    future = asyncio.ensure_future(awaitable)
+    try:
+        # Shield only the timeout wait: wait_for must not await request/driver cancellation.
+        # The caller releases its gates/locks and bounds request cleanup in finally.
+        return await asyncio.wait_for(asyncio.shield(future), timeout)
+    except asyncio.TimeoutError as exc:
+        raise AssertionError(f"W4 timed out after {timeout}s: {step}") from exc
+    finally:
+        if not future.done():
+            future.cancel()
+            future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+
+
+async def _tester_wait_blocked(engine, holder_pid, contender_pid, task, escaped=None):
+    """Positive server evidence of contention; a wall-clock delay is never a passing witness."""
+    assert holder_pid != contender_pid, "W4 requires different PostgreSQL connections"
+
+    async def observe():
+        async with engine.connect() as observer:
+            observer_pid = await observer.scalar(sa.text("SELECT pg_backend_pid()"))
+            assert observer_pid not in (holder_pid, contender_pid)
+            while True:
+                assert not task.done(), "contender completed without waiting for the database guard"
+                assert escaped is None or not escaped.is_set(), "contender read past the missing lock"
+                blockers = await observer.scalar(sa.text("SELECT pg_blocking_pids(:pid)"), {"pid": contender_pid})
+                if holder_pid in blockers:
+                    return
+                await asyncio.sleep(.01)
+
+    await _tester_wait_for(
+        observe(), "no PostgreSQL blocking evidence; scheduling delay is not lock evidence", timeout=10,
+    )
+
+
+async def _tester_cancel_tasks(*tasks):
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if not tasks:
+        return
+    # wait_for(gather(...)) can itself wait forever for cancellation acknowledgement.
+    # asyncio.wait bounds cleanup even when a request is stuck unwinding a DB operation.
+    done, pending = await asyncio.wait(tasks, timeout=10)
+    for task in done:
+        if not task.cancelled():
+            task.exception()  # Retrieve failures, as gather(return_exceptions=True) did.
+    assert not pending, "W4 request cancellation did not finish within 10s"
+
+
+@pytest.mark.parametrize("race", ["same-account", "same-user-two-orgs", "two-admins-one-org"])
+async def test_tester_w4_postgres_races(tester_postgres_db, tester_sdk, sent_otps, monkeypatch, race):
+    from app.services.billing_service import BillingService
+
     client, factory, engine, sessions = tester_postgres_db
     a = await _signup(client, sent_otps, "b184-pga@example.com")
     b = a
-    if race in ("last-slot", "two-admins-one-org"):
+    if race == "two-admins-one-org":
         b = await _signup(client, sent_otps, "b184-pgb@example.com")
-    if race == "last-slot":
-        tester_sdk.promo["max_redemptions"] = 1
     if race in ("same-user-two-orgs", "two-admins-one-org"):
         async with factory() as session:
             if race == "same-user-two-orgs":
@@ -2181,50 +2261,234 @@ async def test_tester_postgres_w4_races(tester_postgres_db, tester_sdk, sent_otp
             "password": PASSWORD, "org_id": oid})
         assert login.status_code == 200, login.text
         b = {**b, "org_id": oid, "headers": {"Authorization": "Bearer " + login.json()["access_token"]}}
+
+    # Avoid incidental customer UPDATE locks and external same-customer conflict checks.
+    async with factory() as session:
+        for oid in {a["org_id"], b["org_id"]}:
+            cid = tester_sdk.create_customer(name=oid)["id"]
+            await _set_customer(session, oid, cid)
+
+    holder_ready, contender_started, escaped, release = (asyncio.Event() for _ in range(4))
+    pids = {}
+    real_lock = BillingService._tester_lock
+    real_reservation = BillingService._tester_reservation
+
+    async def track_lock(service, user_id, org_id):
+        if service.session not in pids:
+            pids[service.session] = service.session.info["b184_pid"]
+            if len(pids) == 2:
+                contender_started.set()
+        return await real_lock(service, user_id, org_id)
+
+    async def hold_after_empty_read(service, user_id, org_id):
+        row = await real_reservation(service, user_id, org_id)
+        if row is None:
+            if holder_ready.is_set():
+                escaped.set()
+            else:
+                holder_ready.set()
+            # Hold the first transaction after its eligibility read and before any INSERT.
+            # With the relevant lock removed, the second transaction reaches this gate too.
+            await _tester_wait_for(release.wait(), "release empty-reservation gate")
+        return row
+
+    monkeypatch.setattr(BillingService, "_tester_lock", track_lock)
+    monkeypatch.setattr(BillingService, "_tester_reservation", hold_after_empty_read)
     before = len(sessions)
-    responses = await asyncio.wait_for(asyncio.gather(_redeem(client, a), _redeem(client, b)), 15)
+    tasks = [asyncio.create_task(_redeem(client, a))]
+    try:
+        await _tester_wait_for(holder_ready.wait(), f"{race}: holder eligibility read", timeout=10)
+        tasks.append(asyncio.create_task(_redeem(client, b)))
+        await _tester_wait_for(contender_started.wait(), f"{race}: contender lock attempt", timeout=10)
+        holder_pid, contender_pid = pids.values()
+        await _tester_wait_blocked(engine, holder_pid, contender_pid, tasks[1], escaped)
+        assert not tester_sdk.creates
+        release.set()
+        responses = await _tester_wait_for(asyncio.gather(*tasks), f"{race}: redemption responses")
+    finally:
+        release.set()
+        await _tester_cancel_tasks(*tasks)
     assert len(sessions) == before + 2 and sessions[-1] is not sessions[-2]
     assert sorted(r.status_code for r in responses)[0] == 200, [r.text for r in responses]
     if race != "same-account":
         assert sum(r.status_code == 200 for r in responses) == 1, [r.text for r in responses]
     assert all(r.status_code in (200, 409, 422) for r in responses), [r.text for r in responses]
-    if race == "last-slot":
-        assert [r.json()["error"]["code"] for r in responses if r.status_code != 200] == ["tester_code_exhausted"]
-    else:
-        assert all(r.json()["error"]["code"] == "tester_already_used" for r in responses if r.status_code != 200)
+    assert all(r.json()["error"]["code"] == "tester_already_used" for r in responses if r.status_code != 200)
     assert len(tester_sdk.successes) == 1
-    if race != "last-slot":
-        assert len(tester_sdk.creates) == 1
+    assert len(tester_sdk.creates) == 1
     assert len([r for r in await _tester_rows(factory) if r.state == "applied"]) == 1
 
 
-async def test_tester_postgres_w4_org_lock_and_pending_checkout(tester_postgres_db, tester_sdk, sent_otps):
+@pytest.mark.parametrize("field", ["user_id", "org_id"])
+async def test_tester_w4_postgres_reservation_unique(tester_postgres_db, tester_sdk, sent_otps, field):
+    """Isolate the durable safety net: overlapping INSERTs, without service row locks masking it."""
+    client, factory, engine, _ = tester_postgres_db
+    a = await _signup(client, sent_otps, "b184-unique-a@example.com")
+    b = await _signup(client, sent_otps, "b184-unique-b@example.com")
+    model = _tester_model()
+    row_a = dict(id=uuid.uuid4(), user_id=a["user_id"], org_id=a["org_id"],
+                 promotion_code_id="promo_b184", tester_price_id=B184_PRICE,
+                 stripe_customer_id="cus_unique_a", started_at=B184_START, ends_at=B184_END, state="pending")
+    row_b = {**row_a, "id": uuid.uuid4(), "user_id": b["user_id"], "org_id": b["org_id"],
+             "stripe_customer_id": "cus_unique_b"}
+    row_b[field] = row_a[field]
+    async with engine.connect() as ca, engine.connect() as cb:
+        async with factory(bind=ca) as first, factory(bind=cb) as second:
+            pid_a = await first.scalar(sa.text("SELECT pg_backend_pid()"))
+            pid_b = await second.scalar(sa.text("SELECT pg_backend_pid()"))
+            await first.execute(sa.insert(model).values(**row_a))
+            # The first row is uncommitted when the second INSERT reaches PostgreSQL.
+            async def contend():
+                try:
+                    await second.execute(sa.insert(model).values(**row_b))
+                    await second.commit()
+                except sa.exc.IntegrityError as exc:
+                    await second.rollback()
+                    return exc
+                return None
+
+            task = asyncio.create_task(contend())
+            try:
+                await _tester_wait_blocked(engine, pid_a, pid_b, task)
+                await _tester_wait_for(first.commit(), "commit winning reservation")
+                error = await _tester_wait_for(task, "conflicting reservation result", timeout=10)
+            finally:
+                # Release the blocking transaction before waiting for contender cleanup.
+                try:
+                    await _tester_wait_for(first.rollback(), "rollback reservation holder")
+                finally:
+                    await _tester_cancel_tasks(task)
+            assert error is not None, "duplicate reservation committed: one-use guard is missing"
+            assert error.orig.sqlstate == "23505"
+            constraint = "uq_tester_redemption_user" if field == "user_id" else "uq_tester_redemption_org"
+            assert constraint in str(error.orig), "an unrelated constraint must not pass this witness"
+    rows = await _tester_rows(factory)
+    assert len(rows) == 1 and rows[0].id == row_a["id"]
+    assert tester_sdk.creates == []
+
+
+async def test_tester_w4_postgres_last_slot(tester_postgres_db, tester_sdk, sent_otps, monkeypatch):
+    """Both accounts pass the last-slot read; the applied Stripe discount must arbitrate the write."""
+    from app.services.billing_service import BillingService
+
+    client, factory, _, sessions = tester_postgres_db
+    actors = [await _signup(client, sent_otps, f"b184-cap-{i}@example.com") for i in range(2)]
+    tester_sdk.promo["max_redemptions"] = 1
+    async with factory() as session:
+        for actor in actors:
+            cid = tester_sdk.create_customer(name=actor["org_id"])["id"]
+            await _set_customer(session, actor["org_id"], cid)
+
+    ready, release = asyncio.Event(), asyncio.Event()
+    arrivals = []
+    real_conflicts = BillingService._tester_conflicts
+
+    async def rendezvous(service, org, local, now, own_subscription_id=None):
+        await real_conflicts(service, org, local, now, own_subscription_id)
+        if own_subscription_id is not None:
+            return
+        info = service.session.info
+        info["b184_conflicts"] = info.get("b184_conflicts", 0) + 1
+        if info["b184_conflicts"] != 2:
+            return
+        # Second fresh conflict check is inside _tester_resume, AFTER it has read and
+        # validated times_redeemed=0. There is no further await before the SDK write.
+        assert tester_sdk.promo["times_redeemed"] == 0 and tester_sdk.creates == []
+        transaction = (await service.session.execute(sa.text(
+            "SELECT pg_backend_pid(), txid_current()"
+        ))).one()
+        arrivals.append((transaction[0], transaction[1], str(org.id)))
+        if len(arrivals) == 2:
+            ready.set()
+        await _tester_wait_for(release.wait(), "release last-slot rendezvous")
+
+    monkeypatch.setattr(BillingService, "_tester_conflicts", rendezvous)
+    before = len(sessions)
+    tasks = [asyncio.create_task(_redeem(client, actor)) for actor in actors]
+    try:
+        await _tester_wait_for(ready.wait(), "both accounts reach last-slot rendezvous", timeout=10)
+        assert len({pid for pid, _, _ in arrivals}) == 2, "same PostgreSQL connection"
+        assert len({xid for _, xid, _ in arrivals}) == 2, "same PostgreSQL transaction"
+        assert len({oid for _, _, oid in arrivals}) == 2
+        pending = await _tester_wait_for(_tester_rows(factory), "read pending last-slot reservations")
+        assert len(pending) == 2 and all(row.state == "pending" for row in pending)
+        assert len({row.id for row in pending}) == 2
+        release.set()
+        responses = await _tester_wait_for(asyncio.gather(*tasks), "last-slot redemption responses")
+    finally:
+        release.set()
+        await _tester_cancel_tasks(*tasks)
+    assert len(sessions) == before + 2
+    # Both checked the same available slot and both attempted the external write.
+    # Distinct reservation keys cannot enforce a cap shared by different accounts.
+    assert len(tester_sdk.creates) == 2
+    assert len({wire["idempotency_key"] for wire in tester_sdk.creates}) == 2
+    assert all(wire.get("discounts") == [{"promotion_code": "promo_b184"}] for wire in tester_sdk.creates)
+    assert len(tester_sdk.successes) == 1, "more than one external subscription consumed the last slot"
+    assert tester_sdk.promo["times_redeemed"] == 1
+    assert sorted(r.status_code for r in responses) == [200, 422], [r.text for r in responses]
+    _tester_refusal(next(r for r in responses if r.status_code != 200), 422, "tester_code_exhausted")
+    rows = await _tester_rows(factory)
+    assert len(rows) == 1 and rows[0].state == "applied"
+    async with factory() as session:
+        subscriptions = list((await session.execute(select(Subscription))).scalars())
+        assert len(subscriptions) == 1
+        assert subscriptions[0].stripe_subscription_id == tester_sdk.successes[0]
+
+
+async def test_tester_w4_postgres_org_lock_and_pending_checkout(
+    tester_postgres_db, tester_sdk, sent_otps, monkeypatch,
+):
+    from app.services.billing_service import BillingService
+
     client, factory, engine, _ = tester_postgres_db
     actor = await _signup(client, sent_otps, "b184-lock@example.com")
     # Preseed customer: incidental ensure_customer UPDATE must not impersonate an explicit lock.
     async with factory() as session:
         await _set_customer(session, actor["org_id"], tester_sdk.saved_customer())
     tester_sdk.fail = "before"
+    entered = asyncio.Event()
+    contender_pid = None
+    real_lock = BillingService._lock
+
+    async def track_lock(service, org_id, product):
+        nonlocal contender_pid
+        contender_pid = service.session.info["b184_pid"]
+        entered.set()
+        return await real_lock(service, org_id, product)
+
+    monkeypatch.setattr(BillingService, "_lock", track_lock)
     # NO KEY UPDATE blocks the explicit FOR UPDATE but permits the reservation FK KEY SHARE check.
     async with factory() as blocker:
+        blocker_pid = await blocker.scalar(sa.text("SELECT pg_backend_pid()"))
         await blocker.execute(select(Organization).where(Organization.id == uuid.UUID(actor["org_id"])).with_for_update(key_share=True))
         pending = asyncio.create_task(_redeem(client, actor))
         try:
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(pending), .25)
+            await _tester_wait_for(entered.wait(), "pending checkout reaches org lock", timeout=10)
+            await _tester_wait_blocked(engine, blocker_pid, contender_pid, pending)
             assert tester_sdk.creates == [], "no-org-lock: external write ran through a held org lock"
+            await _tester_wait_for(blocker.rollback(), "release org lock")
+            response = await _tester_wait_for(pending, "redemption after org lock release")
         finally:
-            await blocker.rollback()
-        response = await asyncio.wait_for(pending, 15)
+            try:
+                await _tester_wait_for(blocker.rollback(), "rollback org-lock holder")
+            finally:
+                await _tester_cancel_tasks(pending)
     assert response.status_code == 502, response.text
     [row] = await _tester_rows(factory)
     assert row.state == "pending"
     # Paid purchase and pending-retry have distinct sessions and run concurrently.
     tester_sdk.fail_lookup = True
-    paid, retry = await asyncio.wait_for(asyncio.gather(
-        client.post(_checkout_url(actor), headers=actor["headers"], json={"price_id": "price_pro"}),
-        _redeem(client, actor),
-    ), 15)
+    tasks = [
+        asyncio.create_task(client.post(
+            _checkout_url(actor), headers=actor["headers"], json={"price_id": "price_pro"},
+        )),
+        asyncio.create_task(_redeem(client, actor)),
+    ]
+    try:
+        paid, retry = await _tester_wait_for(asyncio.gather(*tasks), "paid checkout and pending retry")
+    finally:
+        await _tester_cancel_tasks(*tasks)
     _tester_refusal(paid, 409, "subscription_exists")
     assert retry.status_code == 502
     assert not [c for c in tester_sdk.calls if c[0] == "checkout.create"], "ignore-pending-tester"

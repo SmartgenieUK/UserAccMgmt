@@ -1,7 +1,7 @@
 {
   "brief": "BRIEF-184",
-  "phase": "witness-only",
-  "execution": "Apply exactly one semantic mutation to the later feature implementation, run the witness, require an assertion failure (not import/build/syntax failure), restore, then continue. No mutations have been applied or executed.",
+  "phase": "witness-audit",
+  "execution": "Apply exactly one semantic mutation, run its witness, require an assertion failure (not import/build/syntax failure), restore, then continue. This audit edited files only; it did not run tests or mutants.",
   "timeout_seconds": 300,
   "mutants": [
     {
@@ -170,21 +170,40 @@
       "witness": "W4",
       "target": "app/models/tester_redemption.py",
       "mutation": "Remove the user_id uniqueness constraint (from model and migration for a coherent runnable mutant).",
-      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_postgres_w4_races or tester_w6_setting_and_migration\""
+      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w4_postgres_reservation_unique or tester_w6_setting_and_migration\"",
+      "expected": "The second concurrent INSERT must wait for the first transaction and then raise 23505 naming uq_tester_redemption_user. Removing uniqueness lets it complete and fails the blocking assertion."
+    },
+    {
+      "name": "no-user-lock",
+      "witness": "W4",
+      "target": "app/services/billing_service.py",
+      "mutation": "Remove .with_for_update() from the User SELECT in BillingService._tester_lock (the reported mutant a).",
+      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w4_postgres_races\"",
+      "expected": "same-user-two-orgs must block on the held User lock before reading reservations. The mutant reaches the empty-read gate and fails the positive blocking assertion; uniqueness does not mask this lock witness."
+    },
+    {
+      "name": "no-org-unique",
+      "witness": "W4",
+      "target": "app/models/tester_redemption.py",
+      "mutation": "Remove the org_id uniqueness constraint from both model and migration for a coherent runnable mutant.",
+      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w4_postgres_reservation_unique or tester_w6_setting_and_migration\"",
+      "expected": "The org_id duplicate INSERT completes instead of blocking and failing with uq_tester_redemption_org."
     },
     {
       "name": "no-org-lock",
       "witness": "W4",
       "target": "app/services/billing_service.py",
-      "mutation": "Bypass the org FOR UPDATE lock in tester redemption while retaining normal code execution.",
-      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_postgres_w4_org_lock_and_pending_checkout\""
+      "mutation": "Remove .with_for_update() from BOTH the Organization and Subscription SELECTs in BillingService._lock (the reported mutant b), retaining refresh and normal execution.",
+      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w4_postgres_races or tester_w4_postgres_org_lock_and_pending_checkout\"",
+      "expected": "two-admins-one-org reads past the holder, or the explicit org blocker is bypassed; pg_blocking_pids evidence is absent and an assertion fails."
     },
     {
       "name": "omit-discount",
       "witness": "W4",
       "target": "app/services/stripe_gateway.py",
       "mutation": "Omit the actual promotion_code discount from tester Subscription.create.",
-      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"gateway_calendar or tester_postgres_w4_races\""
+      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w4_postgres_last_slot\"",
+      "expected": "Both accounts have passed the stale last-slot check on separate PostgreSQL transactions. Omitting the discount bypasses the external cap; the wire and single-external-success assertions detect it. Stripe cap enforcement is modeled, not live-tested."
     },
     {
       "name": "new-idempotency-key",
@@ -226,7 +245,7 @@
       "witness": "W4",
       "target": "app/services/billing_service.py",
       "mutation": "Remove the narrow pending-tester guard from ordinary paid checkout.",
-      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"pending_blocks_paid or tester_postgres_w4_org_lock_and_pending_checkout\""
+      "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"pending_blocks_paid or tester_w4_postgres_org_lock_and_pending_checkout\""
     },
     {
       "name": "omit-local-end",
@@ -291,5 +310,6 @@
       "mutation": "Allow the tester price through paid checkout when it overlaps STRIPE_PRICE_MAP.",
       "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w6_reject_tester_checkout\""
     }
-  ]
+  ],
+  "w4_execution": "From C:/localcode/uam-b184 with B184_TEST_DATABASE_URL set to a disposable postgresql+asyncpg database, select -k tester_w4 for all W4 cases or -k tester_w4_postgres for the PostgreSQL witnesses. Unset URL skips PostgreSQL witnesses with an explicit message; a skip is not acceptance."
 }
