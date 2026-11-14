@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     # `| str` lets the documented priceId=product:tier env form reach _parse_price_map: pydantic-settings 2.3.4
     # JSON-decodes a plain dict field first and start-up fails on it (BRIEF-029). The validator returns a dict.
     STRIPE_PRICE_MAP: dict[str, str] | str = {}
+    # Empty disables tester redemption. This price is never a paid checkout option.
+    STRIPE_TESTER_PRICE_ID: str = ""
     STRIPE_CHECKOUT_SUCCESS_URL: str = ""
     STRIPE_CHECKOUT_CANCEL_URL: str = ""
     STRIPE_PORTAL_RETURN_URL: str = ""

@@ -48,6 +48,57 @@ class StripeGateway:
         listing = stripe.checkout.Session.list(customer=customer_id, status="open", limit=100)
         return [{"url": s["url"], "metadata": dict(s["metadata"] or {})} for s in listing.auto_paging_iter()]
 
+    # BRIEF-184: read-only eligibility/recovery seam. Pagination is required for both codes and subscriptions.
+    def retrieve_tester_subscription(self, subscription_id: str) -> dict:
+        # Discounts are ids unless explicitly expanded; recovery must verify the applied promotion.
+        return stripe.Subscription.retrieve(
+            subscription_id, expand=["latest_invoice", "discounts"],
+        ).to_dict()
+
+    def retrieve_price(self, price_id: str) -> dict:
+        return stripe.Price.retrieve(price_id).to_dict()
+
+    def list_promotion_codes(self, code: str) -> list[dict]:
+        listing = stripe.PromotionCode.list(code=code, limit=100, expand=["data.coupon"])
+        return [promotion.to_dict() for promotion in listing.auto_paging_iter()]
+
+    def retrieve_promotion_code(self, promotion_code_id: str) -> dict:
+        return stripe.PromotionCode.retrieve(promotion_code_id, expand=["coupon"]).to_dict()
+
+    def retrieve_coupon(self, coupon_id: str) -> dict:
+        return stripe.Coupon.retrieve(coupon_id).to_dict()
+
+    def retrieve_customer(self, customer_id: str) -> dict:
+        return stripe.Customer.retrieve(customer_id).to_dict()
+
+    def list_pending_invoice_items(self, customer_id: str) -> list[dict]:
+        listing = stripe.InvoiceItem.list(customer=customer_id, pending=True, limit=100)
+        return [item.to_dict() for item in listing.auto_paging_iter()]
+
+    def retrieve_invoice(self, invoice_id: str) -> dict:
+        return stripe.Invoice.retrieve(invoice_id).to_dict()
+
+    def create_tester_subscription(
+        self, customer_id: str, price_id: str, promotion_code_id: str,
+        cancel_at: int, redemption_id: str, idempotency_key: str,
+    ) -> dict:
+        # Manual collection prevents fallback charging a customer's saved card. Never attach, select,
+        # save or charge a payment method on this path. V0 sandbox feasibility remains a release gate.
+        subscription = stripe.Subscription.create(
+            customer=customer_id,
+            items=[{"price": price_id, "quantity": 1}],
+            discounts=[{"promotion_code": promotion_code_id}],
+            cancel_at=cancel_at,
+            collection_method="send_invoice",
+            days_until_due=1,
+            payment_settings={"save_default_payment_method": "off"},
+            automatic_tax={"enabled": False},
+            metadata={"tester_redemption_id": redemption_id},
+            expand=["latest_invoice", "discounts"],
+            idempotency_key=idempotency_key,
+        )
+        return subscription.to_dict()
+
     def create_portal_session(self, customer_id: str, return_url: str, cancel_subscription_id: str | None = None) -> str:
         params = {"customer": customer_id, "return_url": return_url}
         if cancel_subscription_id:
