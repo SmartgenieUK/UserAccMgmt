@@ -10,40 +10,105 @@ from app.core.exceptions import ValidationError
 from app.models import User
 from app.utils.profile_schema import ProfileSchemaRegistry
 
-COMPANY_MAX = 120
-LINKEDIN_MAX = 255
-# The whole LinkedIn rule: https, host exactly linkedin.com or www.linkedin.com (ASCII case folding only), a /in/ or
-# /company/ path with one plain slug, no userinfo, port, query, fragment or escapes. No network check.
-_LINKEDIN = re.compile(r"(?i:https://(?:www\.|[a-z]{2}\.)?linkedin\.com)/(?:in|company)/[A-Za-z0-9_-]+/?", re.ASCII)
+# BRIEF-183: the replacement fields are ordered so refusals are deterministic.
+PROFILE_FIELDS = ("first_name", "last_name", "company_name", "role", "country", "phone", "linkedin_url", "github_url")
+PROFILE_CAPS = {"first_name": 80, "last_name": 80, "company_name": 120, "role": 120,
+                "phone": 32, "linkedin_url": 255, "github_url": 255}
+REQUIRED_FIELDS = {"first_name", "company_name", "role", "country"}
+
+# Frozen ISO alpha-2 / ITU reference: docs/co-arch/evidence/b183-country-reference.md in devgenie-core.
+# Shared codes omit area digits. None means no single prefix; the country remains selectable.
+_COUNTRY_PREFIXES = """AD:376 AE:971 AF:93 AG:1 AI:1 AL:355 AM:374 AO:244 AQ:- AR:54 AS:1 AT:43 AU:61 AW:297 AX:358 AZ:994
+BA:387 BB:1 BD:880 BE:32 BF:226 BG:359 BH:973 BI:257 BJ:229 BL:590 BM:1 BN:673 BO:591 BQ:599 BR:55 BS:1 BT:975 BV:- BW:267 BY:375 BZ:501
+CA:1 CC:61 CD:243 CF:236 CG:242 CH:41 CI:225 CK:682 CL:56 CM:237 CN:86 CO:57 CR:506 CU:53 CV:238 CW:599 CX:61 CY:357 CZ:420
+DE:49 DJ:253 DK:45 DM:1 DO:1 DZ:213
+EC:593 EE:372 EG:20 EH:212 ER:291 ES:34 ET:251
+FI:358 FJ:679 FK:500 FM:691 FO:298 FR:33
+GA:241 GB:44 GD:1 GE:995 GF:594 GG:44 GH:233 GI:350 GL:299 GM:220 GN:224 GP:590 GQ:240 GR:30 GS:500 GT:502 GU:1 GW:245 GY:592
+HK:852 HM:- HN:504 HR:385 HT:509 HU:36
+ID:62 IE:353 IL:972 IM:44 IN:91 IO:246 IQ:964 IR:98 IS:354 IT:39
+JE:44 JM:1 JO:962 JP:81
+KE:254 KG:996 KH:855 KI:686 KM:269 KN:1 KP:850 KR:82 KW:965 KY:1 KZ:7
+LA:856 LB:961 LC:1 LI:423 LK:94 LR:231 LS:266 LT:370 LU:352 LV:371 LY:218
+MA:212 MC:377 MD:373 ME:382 MF:590 MG:261 MH:692 MK:389 ML:223 MM:95 MN:976 MO:853 MP:1 MQ:596 MR:222 MS:1 MT:356 MU:230 MV:960 MW:265 MX:52 MY:60 MZ:258
+NA:264 NC:687 NE:227 NF:672 NG:234 NI:505 NL:31 NO:47 NP:977 NR:674 NU:683 NZ:64
+OM:968
+PA:507 PE:51 PF:689 PG:675 PH:63 PK:92 PL:48 PM:508 PN:64 PR:1 PS:970 PT:351 PW:680 PY:595
+QA:974
+RE:262 RO:40 RS:381 RU:7 RW:250
+SA:966 SB:677 SC:248 SD:249 SE:46 SG:65 SH:- SI:386 SJ:47 SK:421 SL:232 SM:378 SN:221 SO:252 SR:597 SS:211 ST:239 SV:503 SX:1 SY:963 SZ:268
+TC:1 TD:235 TF:- TG:228 TH:66 TJ:992 TK:690 TL:670 TM:993 TN:216 TO:676 TR:90 TT:1 TV:688 TW:886 TZ:255
+UA:380 UG:256 UM:- US:1 UY:598 UZ:998
+VA:39 VC:1 VE:58 VG:1 VI:1 VN:84 VU:678
+WF:681 WS:685
+YE:967 YT:262
+ZA:27 ZM:260 ZW:263"""
+COUNTRY_CALLING_CODES = {
+    code: None if digits == "-" else "+" + digits
+    for code, digits in (entry.split(":") for entry in _COUNTRY_PREFIXES.split())
+}
+
+# Full-match grammars refuse credentials, ports, lookalikes, escaped paths and extra segments.
+_LINKEDIN = re.compile(r"(?i:https://(?:www\.|[a-z]{2}\.)?linkedin\.com)/in/[A-Za-z0-9_-]+/?", re.ASCII)
+_GITHUB = re.compile(r"(?i:(?:https://)?(?:www\.)?github\.com)/([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)/?", re.ASCII)
+
+
+def _invalid(field: str):
+    raise ValidationError(f"The {field} value is not valid.", code=f"{field}_invalid")
 
 
 def _trimmed(value, field: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValidationError(f"{field} must be text.", code=f"{field}_invalid")
+        _invalid(field)
+    if any(unicodedata.category(ch) == "Cc" for ch in value):
+        _invalid(field)
     return value.strip() or None
 
 
-def validate_signup_profile(body) -> tuple[str | None, str | None]:
-    """Both optional fields from a PUT body: trimmed, empty means cleared. Raises a closed 422 code; writes nothing."""
+def validate_signup_profile(body) -> dict[str, str | None]:
+    """Validate all eight values before any assignment. Identity and completion are never read from the body."""
     if not isinstance(body, dict):
         raise ValidationError("The request body must be a JSON object.", code="profile_body_invalid")
-    company = _trimmed(body.get("company_name"), "company_name")
-    if company is not None:
-        if len(company) > COMPANY_MAX:
-            raise ValidationError("The company name is too long.", code="company_name_too_long")
-        if any(unicodedata.category(ch) == "Cc" for ch in company):
-            raise ValidationError("The company name has a character that is not allowed.", code="company_name_invalid")
-    url = _trimmed(body.get("linkedin_url"), "linkedin_url")
-    if url is not None:
-        # A link copied from a browser often carries ?tracking or #anchor; keep only the page address.
-        url = url.split("?", 1)[0].split("#", 1)[0]
-        if len(url) > LINKEDIN_MAX:
-            raise ValidationError("The LinkedIn address is too long.", code="linkedin_url_too_long")
-        if not _LINKEDIN.fullmatch(url):
-            raise ValidationError("The LinkedIn address must be an https linkedin.com /in/ or /company/ page.", code="linkedin_url_invalid")
-    return company, url
+    profile: dict[str, str | None] = {}
+    for field in PROFILE_FIELDS:
+        value = _trimmed(body.get(field), field)
+        if value is None:
+            if field in REQUIRED_FIELDS:
+                raise ValidationError(f"The {field} value is required.", code=f"{field}_required")
+            profile[field] = None
+            continue
+        if field in ("linkedin_url", "github_url"):
+            # Keep the page address when a copied profile link includes tracking or an anchor.
+            value = value.split("?", 1)[0].split("#", 1)[0]
+        if field in PROFILE_CAPS and len(value) > PROFILE_CAPS[field]:
+            raise ValidationError(f"The {field} value is too long.", code=f"{field}_too_long")
+        if field == "country":
+            if not re.fullmatch(r"[A-Za-z]{2}", value, re.ASCII):
+                _invalid(field)
+            value = value.upper()
+            if value not in COUNTRY_CALLING_CODES:
+                _invalid(field)
+        elif field == "phone":
+            if value == COUNTRY_CALLING_CODES[profile["country"]]:
+                value = None
+            else:
+                if not re.fullmatch(r"\+[0-9 ().-]+", value, re.ASCII):
+                    _invalid(field)
+                value = re.sub(r"[ ().-]", "", value)
+                if not re.fullmatch(r"\+[1-9][0-9]{6,14}", value, re.ASCII):
+                    _invalid(field)
+        elif field == "linkedin_url":
+            if not _LINKEDIN.fullmatch(value):
+                _invalid(field)
+        elif field == "github_url":
+            match = _GITHUB.fullmatch(value)
+            if not match or "--" in match.group(1):
+                _invalid(field)
+            value = "https://github.com/" + match.group(1)
+        profile[field] = value
+    return profile
 
 
 class UserService:
@@ -66,7 +131,10 @@ class UserService:
         return user
 
     async def set_signup_profile(self, user: User, body) -> User:
-        user.company_name, user.linkedin_url = validate_signup_profile(body)
+        profile = validate_signup_profile(body)
+        for field, value in profile.items():
+            setattr(user, field, value)
+        user.profile_completed = True
         return user
 
     async def deactivate_user(self, user: User) -> None:

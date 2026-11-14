@@ -393,6 +393,9 @@ async def test_u4_drop_pending_prefill_hints_survive_fresh_requests(fresh_client
         # Poison the provider after callback. Verify must use server-side pending data, not fetch again.
         userinfo.clear()
         r = await fresh_client.post(VERIFY, json={"pending_id": pid, "otp": sent_otps[-1], "first_name": "Forged", "profile_completed": True})
+        # Verify rejects forged profile fields; retry with only the allowed code fields.
+        assert r.status_code == 422, r.text
+        r = await fresh_client.post(VERIFY, json={"pending_id": pid, "otp": sent_otps[-1]})
     assert r.status_code == 200, r.text
     async with session_factory() as fresh:
         row = (await fresh.execute(select(User).where(User.normalized_email == "prefill@example.com"))).scalar_one()

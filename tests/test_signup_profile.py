@@ -245,7 +245,7 @@ COUNTRY_SHA256 = "bf85ae25bac0a1cbaeeff8134e7919818ecfc4e56f98506210039832f1ee77
 COUNTRIES = {k: None if v == "-" else "+" + v for k, v in (entry.split(":") for entry in COUNTRY_REFERENCE.split())}
 
 
-async def test_u2_remove_same_country_both_tables_wrong_country_prefix(client, db_session):
+async def test_u2_remove_same_country_both_tables_wrong_country_prefix(client, db_session, fake_redis):
     assert hashlib.sha256(COUNTRY_REFERENCE.encode()).hexdigest() == COUNTRY_SHA256
     assert len(COUNTRIES) == 249
     # Public module constant is the table seam for the planned service implementation.
@@ -254,16 +254,20 @@ async def test_u2_remove_same_country_both_tables_wrong_country_prefix(client, d
     user, org = await _user(db_session, "world@example.com", "world")
     for country, prefix in COUNTRIES.items():
         for phone in ("", prefix) if prefix else ("",):
+            # Isolate each validation input from the global request rate counter.
+            fake_redis.store.clear()
             r = await _put(client, user, org, good(country=country, phone=phone))
             assert r.status_code == 200, (country, prefix, r.text)
             assert r.json()["country"] == country
             assert r.json()["phone"] is None, (country, prefix, r.json())
 
 
-async def test_u2_accept_unknown_country_closed_complete_set(client, db_session):
+async def test_u2_accept_unknown_country_closed_complete_set(client, db_session, fake_redis):
     user, org = await _user(db_session, "unknown@example.com", "unknown")
     unknown = {"".join(pair) for pair in itertools.product(string.ascii_uppercase, repeat=2)} - COUNTRIES.keys()
     for country in sorted(unknown) + ["GBR", "1A", "UK", "XK"]:
+        # Isolate each validation input from the global request rate counter.
+        fake_redis.store.clear()
         _closed(await _put(client, user, org, good(country=country)), "country_invalid")
 
 

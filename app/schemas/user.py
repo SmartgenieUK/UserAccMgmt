@@ -14,8 +14,15 @@ class UserRead(APIModel):
     avatar_url: str | None
     locale: str | None
     timezone: str | None
+    first_name: str | None
+    last_name: str | None
     company_name: str | None
+    role: str | None
+    country: str | None
+    phone: str | None
     linkedin_url: str | None
+    github_url: str | None
+    profile_completed: bool
     is_active: bool
     is_verified: bool
     custom_fields: dict[str, Any]
@@ -34,5 +41,12 @@ class UserUpdate(APIModel):
 
 
 class SignupProfileRead(APIModel):
+    first_name: str | None
+    last_name: str | None
     company_name: str | None
+    role: str | None
+    country: str | None
+    phone: str | None
     linkedin_url: str | None
+    github_url: str | None
+    profile_completed: bool
