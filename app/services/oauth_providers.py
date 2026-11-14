@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import unicodedata
 from dataclasses import dataclass
 
 import jwt
@@ -17,6 +18,32 @@ class OAuthUserInfo:
     email_verified: bool  # True only when the provider said literal boolean true (CR-208 certification F1)
     name: str | None
     picture: str | None
+    first_name: str | None = None
+    last_name: str | None = None
+    role: str | None = None
+
+
+def profile_hint(value, cap: int) -> str | None:
+    """Provider hints are optional: bad types, controls and oversized values are discarded, never login failures."""
+    if not isinstance(value, str) or any(unicodedata.category(ch) == "Cc" for ch in value):
+        return None
+    value = value.strip()
+    return value if value and len(value) <= cap else None
+
+
+def _prefill(data: dict) -> dict[str, str | None]:
+    def hint(cap: int, *keys: str) -> str | None:
+        for key in keys:
+            value = profile_hint(data.get(key), cap)
+            if value is not None:
+                return value
+        return None
+
+    return {
+        "first_name": hint(80, "given_name", "givenName"),
+        "last_name": hint(80, "family_name", "surname"),
+        "role": hint(120, "job_title", "jobTitle"),
+    }
 
 
 class BaseOAuthProvider:
@@ -63,12 +90,18 @@ class BaseOAuthProvider:
         resp.raise_for_status()
         data = resp.json()
         await client.aclose()
+        hints = _prefill(data)
+        name = profile_hint(data.get("name"), 160) or profile_hint(data.get("displayName"), 160)
+        # Entra combines these hints with verified claims before considering a display-name fallback.
+        if self.name != "entra_external" and not hints["first_name"] and not hints["last_name"]:
+            hints["first_name"] = profile_hint(name, 80)
         return OAuthUserInfo(
             sub=str(data.get("sub") or data.get("id")),
             email=data.get("email") if isinstance(data.get("email"), str) and data.get("email") else None,
             email_verified=data.get("email_verified") is True,
-            name=data.get("name"),
+            name=name,
             picture=data.get("picture"),
+            **hints,
         )
 
     @property
@@ -146,6 +179,14 @@ class EntraExternalProvider(BaseOAuthProvider):
         if info.sub != claims.get("sub"):
             raise AuthError("ID token and userinfo disagree", code="oauth_id_token_invalid")
         info.sub = claims["oid"]
+        # Claims are used only after signature/issuer/audience/expiry verification and subject binding.
+        hints = _prefill(claims)
+        for field, value in hints.items():
+            if getattr(info, field) is None:
+                setattr(info, field, value)
+        if not info.first_name and not info.last_name:
+            info.first_name = (profile_hint(info.name, 80) or profile_hint(claims.get("name"), 80)
+                               or profile_hint(claims.get("displayName"), 80))
         return info
 
     async def _verify_id_token(self, id_token) -> dict:

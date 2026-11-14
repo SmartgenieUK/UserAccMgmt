@@ -18,7 +18,7 @@ from app.security.permissions import resolve_scopes
 from app.services.audit_service import AuditService
 from app.services.email_service import EmailService
 from app.services.identity_link_service import IdentityLinkService
-from app.services.oauth_providers import OAuthUserInfo
+from app.services.oauth_providers import OAuthUserInfo, profile_hint
 from app.services.rate_limit_service import RateLimiter
 from app.services.token_service import TokenService
 from app.utils.security import generate_pkce_pair, normalize_email
@@ -119,7 +119,10 @@ class OAuthService:
         # created, linked or issued until POST /oauth/verify proves the address.
         if not user_info.email_verified and not await self._is_linked(provider_name, user_info.sub):
             return await self._start_verification(provider_name, user_info)
-        return await self._sign_in(provider_name, user_info.sub, user_info.email, user_info.name, user_info.email_verified)
+        return await self._sign_in(
+            provider_name, user_info.sub, user_info.email, user_info.name, user_info.email_verified,
+            first_name=user_info.first_name, last_name=user_info.last_name, role=user_info.role,
+        )
 
     async def verify(self, pending_id: str, otp: str):
         """Complete a pending sign-in with the emailed code: single use, 5 attempts, expires with the code."""
@@ -148,6 +151,7 @@ class OAuthService:
         return await self._sign_in(
             pending["provider"], pending["provider_user_id"], pending["email"], pending["display_name"], True,
             via="email_code", outcome="joined" if existing else "created",
+            first_name=pending.get("first_name"), last_name=pending.get("last_name"), role=pending.get("role"),
         )
 
     async def _is_linked(self, provider_name: str, provider_user_id: str) -> bool:
@@ -174,6 +178,9 @@ class OAuthService:
             "provider_user_id": user_info.sub,
             "email": user_info.email,
             "display_name": user_info.name,
+            "first_name": profile_hint(user_info.first_name, 80),
+            "last_name": profile_hint(user_info.last_name, 80),
+            "role": profile_hint(user_info.role, 120),
             "otp": otp,
         }
         await self.redis.setex(self._pending_key(pending_id), self.settings.OTP_EXPIRE_MINUTES * 60, json.dumps(pending))
@@ -200,6 +207,10 @@ class OAuthService:
         email_verified: bool,
         via: str = "provider",
         outcome: str | None = None,
+        *,
+        first_name: str | None = None,
+        last_name: str | None = None,
+        role: str | None = None,
     ):
         user = await IdentityLinkService(self.session).find_or_create_user(
             provider=ExternalProvider(provider_name),
@@ -208,6 +219,13 @@ class OAuthService:
             display_name=display_name,
             email_verified=email_verified,
         )
+
+        # Prefill is a suggestion only. It never completes Welcome or overwrites a saved choice.
+        if not user.profile_completed:
+            for field, value, cap in (("first_name", first_name, 80), ("last_name", last_name, 80), ("role", role, 120)):
+                hint = profile_hint(value, cap)
+                if getattr(user, field) in (None, "") and hint is not None:
+                    setattr(user, field, hint)
 
         await self.audit_service.log_event(
             action="oauth_login",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import String, Boolean, Integer, func
+from sqlalchemy import String, Boolean, Integer, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -20,6 +20,13 @@ class User(Base):
     timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     company_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     linkedin_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    role: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    github_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    profile_completed: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     custom_fields: Mapped[dict] = mapped_column(JSONB_TYPE, default=dict, nullable=False)

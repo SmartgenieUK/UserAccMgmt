@@ -201,3 +201,74 @@ async def test_entra_authorize_sends_entra_the_google_domain_hint(authorize_clie
 async def test_entra_authorize_refuses_an_unlisted_domain_hint(authorize_client, hint):
     r = await authorize_client.get("/api/v1/oauth/entra_external/authorize", params={"domain_hint": hint})
     assert r.status_code == 422
+
+
+# BRIEF-183 U4: the actual HTTP parsing and verified Entra claim mapping, never a mocked fetch_user_info.
+from tests.test_oauth_verified_email import userinfo, welcome_offline  # noqa: F401
+from app.services.oauth_providers import MicrosoftProvider
+
+
+@pytest.mark.parametrize("claims", [
+    {"given_name": "Grace", "family_name": "Hopper", "job_title": "Admiral"},
+    {"givenName": "Grace", "surname": "Hopper", "jobTitle": "Admiral"},
+])
+async def test_u4_drop_prefill_mapping_real_microsoft_userinfo(userinfo, claims):
+    userinfo.update({"sub": PAIRWISE_SUB, "email": EMAIL, "email_verified": True, **claims})
+    provider = MicrosoftProvider(get_settings())
+    info = await provider.fetch_user_info({"access_token": "offline"})
+    assert (info.first_name, info.last_name, info.role) == ("Grace", "Hopper", "Admiral")
+    assert provider.scopes == ["openid", "email", "profile"]
+    assert provider.userinfo_endpoint == "https://graph.microsoft.com/oidc/userinfo"
+
+
+@pytest.mark.parametrize("source", ["userinfo", "verified_claims"])
+@pytest.mark.parametrize("camel", [False, True])
+async def test_u4_drop_prefill_mapping_real_entra_verified_claims(userinfo, entra_provider_settings, rsa_keypair, source, camel):
+    hints = {"givenName": "Grace", "surname": "Hopper", "jobTitle": "Admiral"} if camel else {"given_name": "Grace", "family_name": "Hopper", "job_title": "Admiral"}
+    userinfo.update({"sub": PAIRWISE_SUB, "email": EMAIL, "email_verified": True, **(hints if source == "userinfo" else {})})
+    provider = EntraExternalProvider(entra_provider_settings)
+    info = await provider.fetch_user_info({"access_token": "offline", "id_token": _id_token(rsa_keypair[0], **(hints if source == "verified_claims" else {}))})
+    assert info.sub == OID
+    assert (info.first_name, info.last_name, info.role) == ("Grace", "Hopper", "Admiral")
+    assert provider.scopes == ["openid", "email", "profile"]
+
+
+async def test_u4_display_name_is_editable_first_name_without_surname_guess(userinfo):
+    userinfo.update({"sub": "s", "email": EMAIL, "name": "Prince Rogers Nelson"})
+    info = await MicrosoftProvider(get_settings()).fetch_user_info({})
+    assert info.first_name == "Prince Rogers Nelson"
+    assert info.last_name is None and info.role is None
+
+
+@pytest.mark.parametrize("bad", [None, "", 42, {}, "X\nY", "x" * 121])
+async def test_u4_invalid_or_missing_title_is_discarded(userinfo, bad):
+    userinfo.update({"sub": "s", "email": EMAIL, "given_name": "Grace", "job_title": bad})
+    info = await MicrosoftProvider(get_settings()).fetch_user_info({})
+    assert info.first_name == "Grace"
+    assert info.role is None
+
+
+@pytest.mark.parametrize("verified", [True, False])
+async def test_u4_real_entra_callback_and_pending_code_transport(db_session, fake_redis, sent_otps, monkeypatch, userinfo, entra_provider_settings, rsa_keypair, verified):
+    userinfo.update({"sub": PAIRWISE_SUB, "email": EMAIL, "email_verified": verified})
+    provider = EntraExternalProvider(entra_provider_settings)
+
+    async def exchange(**kwargs):
+        return {"access_token": "offline", "id_token": _id_token(rsa_keypair[0], given_name="Grace", family_name="Hopper", job_title="Admiral")}
+
+    monkeypatch.setattr(provider, "exchange_code", exchange)
+    registry = PluginRegistry()
+    registry.register_oauth_provider(provider)
+    settings = entra_provider_settings
+    service = OAuthService(db_session, settings, registry, TokenService(db_session, settings), EmailService(settings), AuditService(db_session, settings), fake_redis)
+    await service.state_store.store("prefill", OAuthState(code_verifier="v", redirect_uri="http://cb"))
+    result = await service.callback("entra_external", "c", "prefill", None)
+    if not verified:
+        # Simulate a new request/service: only Redis, not an in-memory closure, transports the hints.
+        pending_id = result.pending_id
+        service = OAuthService(db_session, settings, registry, TokenService(db_session, settings), EmailService(settings), AuditService(db_session, settings), fake_redis)
+        result = await service.verify(pending_id, sent_otps[-1])
+    assert result[0]
+    row = (await db_session.execute(select(User).where(User.normalized_email == EMAIL))).scalar_one()
+    await db_session.refresh(row)
+    assert (row.first_name, row.last_name, row.role, row.profile_completed) == ("Grace", "Hopper", "Admiral", False)

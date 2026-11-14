@@ -42,7 +42,7 @@ async def set_signup_profile(
     settings=Depends(get_settings),
     registry=Depends(get_profile_registry),
 ):
-    """Set or clear the optional company name and LinkedIn URL of the signed-in user (the token's subject only)."""
+    """Validate and replace all Welcome details of the bearer user before committing completion."""
     try:
         body = await request.json()
     except Exception:
