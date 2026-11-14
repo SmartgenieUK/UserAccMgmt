@@ -78,6 +78,11 @@ class StripeGateway:
     def retrieve_invoice(self, invoice_id: str) -> dict:
         return stripe.Invoice.retrieve(invoice_id).to_dict()
 
+    def hold_tester_invoice(self, invoice_id: str) -> dict:
+        # Leave the subscription invoice in draft: never finalize, send or pay it.
+        # Repeating this assignment after a lost response is safe.
+        return stripe.Invoice.modify(invoice_id, auto_advance=False).to_dict()
+
     def create_tester_subscription(
         self, customer_id: str, price_id: str, promotion_code_id: str,
         cancel_at: int, redemption_id: str, idempotency_key: str,

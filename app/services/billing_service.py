@@ -89,7 +89,7 @@ class BillingService:
         # BUG-08: one live subscription per org and product. Lock, refuse a live one, reuse an open session.
         org, local = await self._lock(org.id, product)
         if product == "devgenie" and (await self.session.execute(
-            select(TesterRedemption.id).where(TesterRedemption.org_id == org.id, TesterRedemption.state == "pending")
+            select(TesterRedemption.id).where(TesterRedemption.org_id == org.id, TesterRedemption.state.in_(("reserved", "pending")))
         )).first():
             raise ConflictError("Tester redemption is pending", code="subscription_exists")
         if local and local.status in LOCAL_LIVE_STATUSES and local.stripe_subscription_id:
@@ -149,7 +149,7 @@ class BillingService:
             )).execution_options(populate_existing=True)
         )).scalars().all()
         for row in rows:
-            if (row.state != "pending" or str(row.user_id) != str(user_id)
+            if (row.state not in ("reserved", "pending") or str(row.user_id) != str(user_id)
                     or str(row.org_id) != str(org_id)):
                 raise ConflictError("Tester month already used", code="tester_already_used")
         return rows[0] if rows else None
@@ -278,9 +278,34 @@ class BillingService:
                 or _at(discounts[0], "promotion_code") != reservation.promotion_code_id
                 or _at(sub, "collection_method") != "send_invoice"
                 or _at(sub, "default_payment_method") or _at(sub, "default_source")
-                or _at(_at(sub, "automatic_tax"), "enabled")
+                or _at(_at(sub, "automatic_tax"), "enabled")):
+            raise self._tester_unavailable()
+        self._tester_hold_invoice(reservation, sub["id"], invoice)
+
+    @staticmethod
+    def _invoice_subscription(invoice):
+        # Basil moved the subscription reference into parent.subscription_details.
+        return (_at(_at(_at(invoice, "parent"), "subscription_details"), "subscription")
+                or _at(invoice, "subscription"))
+
+    def _tester_hold_invoice(self, reservation, subscription_id, invoice):
+        invoice_id = _at(invoice, "id")
+
+        def own_draft(value):
+            return (isinstance(invoice_id, str) and bool(invoice_id)
+                    and _at(value, "id") == invoice_id
+                    and _at(value, "customer") == reservation.stripe_customer_id
+                    and self._invoice_subscription(value) == subscription_id
+                    and _at(value, "status") == "draft")
+
+        if not own_draft(invoice):
+            raise self._tester_unavailable()
+        if _at(invoice, "auto_advance") is not False:
+            invoice = self.gateway.hold_tester_invoice(invoice_id)
+        # Confirm Stripe's reply before granting access. Hold even an unexpectedly nonzero draft
+        # first, so a failed zero-value check cannot leave an invoice scheduled to be sent.
+        if (not own_draft(invoice) or _at(invoice, "auto_advance") is not False
                 or _at(invoice, "currency") != "gbp"
-                or _at(invoice, "status") not in ("paid", "open")
                 or any(type(_at(invoice, key)) is not int or _at(invoice, key) != 0
                        for key in ("total", "subtotal", "amount_due", "amount_paid", "amount_remaining"))
                 or _at(invoice, "charge") or _at(invoice, "payment_intent")):
@@ -323,7 +348,9 @@ class BillingService:
         await self.session.commit()
         return {"status": "active", "tier": "pro", "ends_at": end.isoformat()}
 
-    async def _tester_resume(self, org, local, reservation, fresh=False):
+    async def _tester_resume(self, org, local, reservation):
+        # Durable state, not the calling request, proves whether a write has been attempted.
+        fresh = reservation.state == "reserved"
         now = datetime.now(timezone.utc)
         # Find our own external write before code expiry/cap checks or live-plan conflict checks.
         # A lost response has no local subscription id, so scan every page for server-written metadata.
@@ -346,22 +373,38 @@ class BillingService:
             return await self._tester_finish(org, local, reservation, sub, now)
         # An empty read is NOT proof of non-creation. Only replay the original key/payload during
         # Stripe's minimum 24-hour retention. After that an operator must reconcile; never mint a key.
-        if not timedelta(0) <= now - reservation.started_at < timedelta(hours=24) or now >= reservation.ends_at:
+        if not fresh and (not timedelta(0) <= now - reservation.started_at < timedelta(hours=24)
+                          or now >= reservation.ends_at):
             raise self._tester_unavailable()
         try:
+            if now >= reservation.ends_at:
+                raise ValidationError("Tester reservation expired", code="tester_code_expired")
             price = self._tester_price(reservation.tester_price_id)
             promotion = self.gateway.retrieve_promotion_code(reservation.promotion_code_id)
             self._tester_promotion(promotion, price, reservation.stripe_customer_id, now)
         except ValidationError:
-            # Preserve pending even when a competing account consumed the cap. A newly reserved
-            # request can report that refusal; an uncertain retry still needs reconciliation.
+            # A reserved row proves no request has attempted the external write. Commit its release
+            # before returning a definite refusal, so a fresh request can start paid checkout.
+            # An uncertain retry cannot use an empty lookup as proof of non-creation.
             if fresh:
+                await self.session.delete(reservation)
+                await self.session.commit()
                 raise
             raise self._tester_unavailable() from None
         if org.stripe_customer_id != reservation.stripe_customer_id:
             raise self._tester_unavailable()
         await self._tester_conflicts(org, local, now)
         self._tester_customer_safe(reservation.stripe_customer_id)
+        if fresh:
+            # Persist uncertainty BEFORE calling Stripe. A retry may overtake this request during
+            # either commit/relock; it must never release a reservation whose write was attempted.
+            user_id, org_id = reservation.user_id, reservation.org_id
+            reservation.state = "pending"
+            await self.session.commit()
+            org, local = await self._tester_lock(user_id, org_id)
+            reservation = await self._tester_reservation(user_id, org_id)
+            if reservation is None:
+                raise self._tester_unavailable()
         try:
             sub = self.gateway.create_tester_subscription(
                 customer_id=reservation.stripe_customer_id,
@@ -416,16 +459,16 @@ class BillingService:
             reservation = TesterRedemption(
                 id=uuid.uuid4(), user_id=actor_user_id, org_id=org_id,
                 promotion_code_id=promotion["id"], tester_price_id=price["id"],
-                stripe_customer_id=customer_id, started_at=now, ends_at=end, state="pending",
+                stripe_customer_id=customer_id, started_at=now, ends_at=end, state="reserved",
             )
             self.session.add(reservation)
-            # The customer and reservation must survive any subsequent unknown Stripe/DB outcome.
+            # Reserve before rechecking eligibility; pending is recorded separately before any write.
             await self.session.commit()
             org, local = await self._tester_lock(actor_user_id, org_id)
             reservation = await self._tester_reservation(actor_user_id, org_id)
             if reservation is None:
                 raise self._tester_unavailable()
-            return await self._tester_resume(org, local, reservation, fresh=True)
+            return await self._tester_resume(org, local, reservation)
         except (stripe.error.StripeError, SQLAlchemyError):
             await self.session.rollback()
             raise self._tester_unavailable() from None
@@ -510,6 +553,8 @@ class BillingService:
             await self._update(data_object)
         elif event_type == "customer.subscription.deleted":
             await self._cancel(data_object)
+        elif event_type == "invoice.created":
+            await self._hold_created_tester_invoice(data_object)
 
         self.session.add(StripeEvent(event_id=event_id, type=event_type))
         try:
@@ -517,6 +562,32 @@ class BillingService:
         except IntegrityError:
             # A concurrent delivery of the same event applied it first; drop ours.
             await self.session.rollback()
+
+    async def _hold_created_tester_invoice(self, data_object):
+        # A create response may be lost before the synchronous invoice hold. Secure the draft
+        # on webhook delivery too, without waiting for a user retry or granting entitlement.
+        customer_id, invoice_id = _at(data_object, "customer"), _at(data_object, "id")
+        if not customer_id or not invoice_id:
+            return
+        reservations = (await self.session.execute(
+            select(TesterRedemption).where(TesterRedemption.stripe_customer_id == customer_id)
+        )).scalars().all()
+        if not reservations:
+            return
+        try:
+            invoice = self.gateway.retrieve_invoice(invoice_id)
+            subscription_id = self._invoice_subscription(invoice)
+            if not subscription_id:
+                return  # An ordinary standalone invoice.
+            sub = self.gateway.retrieve_tester_subscription(subscription_id)
+            reservation = next((r for r in reservations
+                                if str(r.id) == _at(_at(sub, "metadata"), "tester_redemption_id")), None)
+            if reservation is None:
+                return  # A different subscription, including a later paid replacement.
+            self._tester_confirm(reservation, {**sub, "latest_invoice": invoice})
+        except (stripe.error.StripeError, AppError):
+            # Do not acknowledge an unconfirmed hold; Stripe must retry this event.
+            raise ActivationError("stripe_unavailable", org_id=str(reservations[0].org_id)) from None
 
     def _retrieve(self, stripe_subscription_id: str, org_id) -> dict:
         try:

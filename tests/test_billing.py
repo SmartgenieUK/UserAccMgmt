@@ -1288,6 +1288,9 @@ class _TesterStripeSDK:
         self.open_sessions = []
         self.fail = None
         self.fail_lookup = False
+        self.fail_invoice_hold = None
+        self.finalized_invoices = []
+        self.sent_invoices = []
         self.price = {
             "id": B184_PRICE, "active": True, "currency": "gbp", "unit_amount": 0,
             "unit_amount_decimal": "0", "billing_scheme": "per_unit", "type": "recurring",
@@ -1324,6 +1327,7 @@ class _TesterStripeSDK:
             (_stripe.checkout.Session, "list", self.list_sessions),
             (_stripe.checkout.Session, "create", self.create_checkout),
             (_stripe.Invoice, "retrieve", self.retrieve_invoice),
+            (_stripe.Invoice, "modify", self.modify_invoice),
             (_stripe.InvoiceItem, "list", lambda **kw: _TesterPages([[]])),
             (_stripe.PaymentMethod, "list", lambda **kw: _TesterPages([[]])),
         ]:
@@ -1333,6 +1337,7 @@ class _TesterStripeSDK:
             (_stripe.PaymentMethod, "attach"), (_stripe.Customer, "modify"), (_stripe.Customer, "create_source"),
             (_stripe.PaymentIntent, "create"), (_stripe.PaymentIntent, "confirm"),
             (_stripe.Charge, "create"), (_stripe.Invoice, "pay"), (_stripe.Subscription, "modify"),
+            (_stripe.Invoice, "finalize_invoice"), (_stripe.Invoice, "send_invoice"),
         ]:
             monkeypatch.setattr(target, method, deny)
 
@@ -1405,7 +1410,10 @@ class _TesterStripeSDK:
                          if kwargs.get("discounts") else None),
             "collection_method": kwargs.get("collection_method"),
             "latest_invoice": {"id": "in_" + sid, "total": 0, "subtotal": 0, "amount_due": 0,
-                               "amount_paid": 0, "amount_remaining": 0, "status": "paid",
+                               "amount_paid": 0, "amount_remaining": 0, "status": "draft",
+                               "auto_advance": True, "customer": kwargs["customer"],
+                               "parent": {"type": "subscription_details",
+                                          "subscription_details": {"subscription": sid}},
                                "currency": "gbp", "charge": None, "payment_intent": None},
         }
         self.subscriptions[sid] = result
@@ -1441,8 +1449,34 @@ class _TesterStripeSDK:
         return _tester_object(result)
 
     def retrieve_invoice(self, invoice_id, **kwargs):
-        return _tester_object(next(s["latest_invoice"] for s in self.subscriptions.values()
-                                   if s["latest_invoice"]["id"] == invoice_id))
+        self.calls.append(("invoice.retrieve", invoice_id))
+        return _tester_object(copy.deepcopy(next(s["latest_invoice"] for s in self.subscriptions.values()
+                                                 if s["latest_invoice"]["id"] == invoice_id)))
+
+    def modify_invoice(self, invoice_id, **kwargs):
+        self.calls.append(("invoice.modify", {"id": invoice_id, **copy.deepcopy(kwargs)}))
+        assert kwargs == {"auto_advance": False}, "tester invoices may only have advancement disabled"
+        invoice = next(s["latest_invoice"] for s in self.subscriptions.values()
+                       if s["latest_invoice"]["id"] == invoice_id)
+        assert invoice["status"] == "draft", "never finalize or send a tester invoice"
+        failure, self.fail_invoice_hold = self.fail_invoice_hold, None
+        if failure == "before":
+            raise _stripe.error.APIConnectionError("B184 invoice hold unavailable")
+        if failure != "ignored":
+            invoice["auto_advance"] = False
+        if failure == "after":
+            raise _stripe.error.APIConnectionError("B184 invoice hold response lost")
+        return _tester_object(copy.deepcopy(invoice))
+
+    def advance_invoices(self):
+        """Model the send_invoice finalization timer; zero totals alone do not suppress it."""
+        for sub in self.subscriptions.values():
+            invoice = sub.get("latest_invoice")
+            if invoice and invoice["status"] == "draft" and invoice["auto_advance"]:
+                invoice["status"] = "paid" if invoice["amount_due"] == 0 else "open"
+                self.finalized_invoices.append(invoice["id"])
+                if invoice["amount_due"]:
+                    self.sent_invoices.append(invoice["id"])
 
 
 @pytest.fixture
@@ -2392,7 +2426,7 @@ async def test_tester_w4_postgres_last_slot(tester_postgres_db, tester_sdk, sent
         if info["b184_conflicts"] != 2:
             return
         # Second fresh conflict check is inside _tester_resume, AFTER it has read and
-        # validated times_redeemed=0. There is no further await before the SDK write.
+        # validated times_redeemed=0, before recording/attempting the SDK write.
         assert tester_sdk.promo["times_redeemed"] == 0 and tester_sdk.creates == []
         transaction = (await service.session.execute(sa.text(
             "SELECT pg_backend_pid(), txid_current()"
@@ -2411,7 +2445,7 @@ async def test_tester_w4_postgres_last_slot(tester_postgres_db, tester_sdk, sent
         assert len({xid for _, xid, _ in arrivals}) == 2, "same PostgreSQL transaction"
         assert len({oid for _, _, oid in arrivals}) == 2
         pending = await _tester_wait_for(_tester_rows(factory), "read pending last-slot reservations")
-        assert len(pending) == 2 and all(row.state == "pending" for row in pending)
+        assert len(pending) == 2 and all(row.state in ("reserved", "pending") for row in pending)
         assert len({row.id for row in pending}) == 2
         release.set()
         responses = await _tester_wait_for(asyncio.gather(*tasks), "last-slot redemption responses")
@@ -2492,3 +2526,318 @@ async def test_tester_w4_postgres_org_lock_and_pending_checkout(
     _tester_refusal(paid, 409, "subscription_exists")
     assert retry.status_code == 502
     assert not [c for c in tester_sdk.calls if c[0] == "checkout.create"], "ignore-pending-tester"
+
+
+# Certification findings 1/2: written before the corresponding service/gateway fixes.
+# These witnesses are NOT RUN by the file-only executor.
+B184_RECHECK_REFUSALS = [
+    ("expired", "tester_code_expired"),
+    ("expired-after-retention", "tester_code_expired"),
+    ("inactive", "invalid_tester_code"),
+    ("cap-reached", "tester_code_exhausted"),
+    ("another-account", "invalid_tester_code"),
+]
+
+
+async def _tester_post_commit_refusal(client, factory, actor, sdk, sent_otps, monkeypatch, case, code):
+    from app.services.billing_service import BillingService
+
+    ready, release = asyncio.Event(), asyncio.Event()
+    real_lock = BillingService._tester_lock
+    arrivals = []
+    calls = 0
+
+    async def stop_after_commit(service, user_id, org_id):
+        nonlocal calls
+        if str(user_id) == actor["user_id"] and str(org_id) == actor["org_id"]:
+            calls += 1
+            if calls == 2:
+                # Reservation commit has returned, but the eligibility recheck has not run.
+                arrivals.append(service.session.info.get("b184_pid"))
+                ready.set()
+                await _tester_wait_for(release.wait(), "release post-commit eligibility recheck")
+        return await real_lock(service, user_id, org_id)
+
+    monkeypatch.setattr(BillingService, "_tester_lock", stop_after_commit)
+    pending_task = asyncio.create_task(_redeem(client, actor))
+    winner = None
+    try:
+        await _tester_wait_for(ready.wait(), "reservation committed before recheck")
+        [pending] = await _tester_rows(factory)
+        assert pending.state in ("reserved", "pending") and str(pending.org_id) == actor["org_id"]
+        assert sdk.creates == []
+        # The committed row is visible to a different request and blocks paid checkout until refusal.
+        blocked = await _tester_wait_for(client.post(
+            _checkout_url(actor), headers=actor["headers"], json={"price_id": "price_pro"},
+        ), "checkout while reservation is pending")
+        _tester_refusal(blocked, 409, "subscription_exists")
+        if case == "expired-after-retention":
+            sdk.now += timedelta(days=11)
+        elif case == "expired":
+            sdk.promo["expires_at"] = int(sdk.now.timestamp())
+        elif case == "inactive":
+            sdk.promo["active"] = False
+        elif case == "another-account":
+            sdk.promo["customer"] = "cus_other_account"
+        else:
+            sdk.promo["max_redemptions"] = 1
+            winner = await _signup(client, sent_otps, "b184-recheck-winner@example.com")
+            _tester_success(await _tester_wait_for(_redeem(client, winner), "other account takes last slot"))
+            assert sdk.promo["times_redeemed"] == 1
+        release.set()
+        response = await _tester_wait_for(pending_task, "refused post-commit recheck")
+    finally:
+        release.set()
+        await _tester_cancel_tasks(pending_task)
+    _tester_refusal(response, 422, code)
+    # This read and the following checkout use fresh sessions: rollback-only cleanup cannot pass.
+    assert not [r for r in await _tester_rows(factory) if str(r.org_id) == actor["org_id"]]
+    assert len(sdk.creates) == (1 if winner else 0), "refused account attempted an external write"
+    async with factory() as session:
+        assert (await session.execute(select(Subscription).where(
+            Subscription.org_id == uuid.UUID(actor["org_id"]),
+        ))).scalar_one_or_none() is None
+        ent = await EntitlementService(session, sdk.settings, AuditService(session, sdk.settings)).resolve(actor["org_id"], "devgenie")
+        assert ent.tier == "lite"
+    # It must remain an ordinary refusal on retry, never the old stuck-pending 502.
+    _tester_refusal(await _redeem(client, actor), 422, code)
+    paid = await client.post(_checkout_url(actor), headers=actor["headers"], json={"price_id": "price_pro"})
+    assert paid.status_code == 200, paid.text
+    [wire] = [c[1] for c in sdk.calls if c[0] == "checkout.create"]
+    assert wire["line_items"] == [{"price": "price_pro", "quantity": 1}]
+    assert wire["allow_promotion_codes"] is True and wire["payment_method_types"] == ["card"]
+    assert "payment_method_collection" not in wire
+    return arrivals[0]
+
+
+@pytest.mark.parametrize("case,code", B184_RECHECK_REFUSALS, ids=[c[0] for c in B184_RECHECK_REFUSALS])
+async def test_tester_w6_post_commit_refusal_releases_checkout(
+    fresh_client, session_factory, tester_admin, tester_sdk, sent_otps, monkeypatch, case, code,
+):
+    await _tester_post_commit_refusal(
+        fresh_client, session_factory, tester_admin, tester_sdk, sent_otps, monkeypatch, case, code,
+    )
+
+
+@pytest.mark.parametrize("case,code", B184_RECHECK_REFUSALS, ids=[c[0] for c in B184_RECHECK_REFUSALS])
+async def test_tester_w4_postgres_post_commit_refusal_releases_checkout(
+    tester_postgres_db, tester_sdk, sent_otps, monkeypatch, case, code,
+):
+    client, factory, engine, sessions = tester_postgres_db
+    actor = await _signup(client, sent_otps, "b184-recheck-pg@example.com")
+    # Keep one independent backend pinned for the duration, proving durable visibility to another connection.
+    async with engine.connect() as observer:
+        observer_pid = await observer.scalar(sa.text("SELECT pg_backend_pid()"))
+        refusal_pid = await _tester_post_commit_refusal(
+            client, factory, actor, tester_sdk, sent_otps, monkeypatch, case, code,
+        )
+        assert refusal_pid is not None and refusal_pid != observer_pid
+        assert await observer.scalar(select(sa.func.count()).select_from(_tester_model()).where(
+            _tester_model().org_id == uuid.UUID(actor["org_id"]),
+        )) == 0
+    assert sessions and all(s.info["b184_pid"] != observer_pid for s in sessions[-3:])
+
+
+@pytest.mark.parametrize("case,code", B184_RECHECK_REFUSALS, ids=[c[0] for c in B184_RECHECK_REFUSALS])
+async def test_tester_w4_uncertain_recheck_refusal_keeps_pending(
+    fresh_client, session_factory, tester_admin, tester_sdk, case, code,
+):
+    # An empty recovery lookup cannot prove that a timed-out create had no effect.
+    sdk = tester_sdk
+    await _tester_pending(fresh_client, tester_admin, session_factory, sdk, "before")
+    if case == "expired-after-retention": sdk.now += timedelta(days=11)
+    elif case == "expired": sdk.promo["expires_at"] = int(sdk.now.timestamp())
+    elif case == "inactive": sdk.promo["active"] = False
+    elif case == "cap-reached": sdk.promo["times_redeemed"] = sdk.promo["max_redemptions"]
+    else: sdk.promo["customer"] = "cus_other_account"
+    _tester_refusal(await _redeem(fresh_client, tester_admin), 502, "stripe_unavailable")
+    [pending] = await _tester_rows(session_factory)
+    assert pending.state == "pending" and len(sdk.creates) == 1
+    paid = await fresh_client.post(_checkout_url(tester_admin), headers=tester_admin["headers"], json={"price_id": "price_pro"})
+    _tester_refusal(paid, 409, "subscription_exists")
+
+
+def _tester_invoice_held(sdk):
+    [sid] = sdk.successes
+    invoice = sdk.subscriptions[sid]["latest_invoice"]
+    assert invoice["status"] == "draft" and invoice["auto_advance"] is False
+    assert any(name == "invoice.modify" and wire == {"id": invoice["id"], "auto_advance": False}
+               for name, wire in sdk.calls)
+    sdk.advance_invoices()
+    assert invoice["status"] == "draft"
+    assert sdk.finalized_invoices == [] and sdk.sent_invoices == []
+
+
+@pytest.mark.parametrize("saved", [False, True], ids=["cardless", "saved-card"])
+async def test_tester_w1_initial_draft_is_held_without_finalizing_or_sending(
+    fresh_client, session_factory, tester_admin, tester_sdk, saved,
+):
+    if saved:
+        async with session_factory() as session:
+            await _set_customer(session, tester_admin["org_id"], tester_sdk.saved_customer())
+    _tester_success(await _redeem(fresh_client, tester_admin))
+    await _tester_applied(session_factory, tester_admin, tester_sdk)
+    _tester_invoice_held(tester_sdk)
+
+
+@pytest.mark.parametrize("failure", ["lost-create-response", "hold-before", "hold-after"])
+async def test_tester_w4_draft_hold_recovery(
+    fresh_client, session_factory, tester_admin, tester_sdk, failure,
+):
+    sdk = tester_sdk
+    if failure == "lost-create-response":
+        sdk.fail = "after"
+    else:
+        sdk.fail_invoice_hold = failure.removeprefix("hold-")
+    _tester_refusal(await _redeem(fresh_client, tester_admin), 502, "stripe_unavailable")
+    [pending] = await _tester_rows(session_factory)
+    assert pending.state == "pending" and len(sdk.successes) == 1
+    async with session_factory() as session:
+        assert list((await session.execute(select(Subscription))).scalars()) == []
+    # Recovery must find its subscription before refusing the now-consumed/disabled code.
+    sdk.promo.update(active=False, max_redemptions=1)
+    _tester_success(await _redeem(fresh_client, tester_admin, "UNRELATED-CODE"))
+    assert len(sdk.creates) == 1 and len(sdk.successes) == 1
+    await _tester_applied(session_factory, tester_admin, sdk)
+    _tester_invoice_held(sdk)
+
+
+async def test_tester_w4_draft_hold_must_be_confirmed(fresh_client, session_factory, tester_admin, tester_sdk):
+    tester_sdk.fail_invoice_hold = "ignored"
+    _tester_refusal(await _redeem(fresh_client, tester_admin), 502, "stripe_unavailable")
+    [pending] = await _tester_rows(session_factory)
+    assert pending.state == "pending"
+    assert tester_sdk.subscriptions[tester_sdk.successes[0]]["latest_invoice"]["auto_advance"] is True
+    _tester_success(await _redeem(fresh_client, tester_admin))
+    _tester_invoice_held(tester_sdk)
+
+
+@pytest.mark.parametrize("shape", ["basil", "legacy"])
+@pytest.mark.parametrize("failure", [False, True], ids=["hold", "retry-hold"])
+async def test_tester_w5_invoice_created_holds_pending_draft(
+    fresh_client, session_factory, tester_admin, tester_sdk, shape, failure,
+):
+    sdk = tester_sdk
+    await _tester_pending(fresh_client, tester_admin, session_factory, sdk, "after")
+    [sid] = sdk.successes
+    invoice = sdk.subscriptions[sid]["latest_invoice"]
+    if shape == "legacy":
+        invoice.pop("parent")
+        invoice["subscription"] = sid
+    event = {"id": "evt_b184_draft", "type": "invoice.created", "data": {"object": copy.deepcopy(invoice)}}
+    if failure:
+        sdk.fail_invoice_hold = "before"
+        response = await _post(fresh_client, event)
+        assert response.status_code == 500, response.text
+        async with session_factory() as session:
+            assert await session.get(StripeEvent, event["id"]) is None
+    assert (await _post(fresh_client, event)).status_code == 200
+    _tester_invoice_held(sdk)
+    # The event secures the invoice even if the user never retries; entitlement still needs confirmation.
+    [pending] = await _tester_rows(session_factory)
+    assert pending.state == "pending"
+    calls = len(sdk.calls)
+    assert (await _post(fresh_client, event)).status_code == 200
+    assert len(sdk.calls) == calls
+    _tester_success(await _redeem(fresh_client, tester_admin))
+    assert len(sdk.creates) == 1
+    _tester_invoice_held(sdk)
+
+
+async def test_tester_w4_nonzero_draft_is_held_without_granting_access(
+    fresh_client, session_factory, tester_admin, tester_sdk,
+):
+    await _tester_pending(fresh_client, tester_admin, session_factory, tester_sdk, "after")
+    invoice = tester_sdk.subscriptions[tester_sdk.successes[0]]["latest_invoice"]
+    invoice.update(total=100, amount_due=100, amount_remaining=100)
+    _tester_refusal(await _redeem(fresh_client, tester_admin), 502, "stripe_unavailable")
+    _tester_invoice_held(tester_sdk)
+    [pending] = await _tester_rows(session_factory)
+    assert pending.state == "pending"
+    async with session_factory() as session:
+        assert list((await session.execute(select(Subscription))).scalars()) == []
+
+
+@pytest.mark.parametrize("mismatch", ["customer", "subscription", "finalized"])
+async def test_tester_w4_draft_confirmation_rejects_mismatch(
+    fresh_client, session_factory, tester_admin, tester_sdk, mismatch,
+):
+    await _tester_pending(fresh_client, tester_admin, session_factory, tester_sdk, "after")
+    invoice = tester_sdk.subscriptions[tester_sdk.successes[0]]["latest_invoice"]
+    if mismatch == "customer": invoice["customer"] = "cus_foreign"
+    elif mismatch == "subscription": invoice["parent"]["subscription_details"]["subscription"] = "sub_foreign"
+    else: invoice["status"] = "paid"
+    _tester_refusal(await _redeem(fresh_client, tester_admin), 502, "stripe_unavailable")
+    assert not [c for c in tester_sdk.calls if c[0] == "invoice.modify"]
+    [pending] = await _tester_rows(session_factory)
+    assert pending.state == "pending"
+
+
+async def test_tester_w6_paid_invoice_created_is_unchanged(fresh_client, session_factory, tester_admin, tester_sdk):
+    # Even a customer who previously redeemed can later buy an ordinary paid subscription.
+    _tester_success(await _redeem(fresh_client, tester_admin))
+    tester_sub = tester_sdk.subscriptions[tester_sdk.successes[0]]
+    paid_sub = copy.deepcopy(tester_sub)
+    paid_sub.update(id="sub_b184_paid_invoice", metadata={}, collection_method="charge_automatically")
+    paid_sub["items"]["data"][0]["price"] = {"id": "price_pro"}
+    paid_invoice = paid_sub["latest_invoice"]
+    paid_invoice.update(id="in_b184_paid_invoice", auto_advance=True, total=100, amount_due=100)
+    paid_invoice["parent"]["subscription_details"]["subscription"] = paid_sub["id"]
+    tester_sdk.subscriptions[paid_sub["id"]] = paid_sub
+    event = {"id": "evt_b184_paid_invoice", "type": "invoice.created", "data": {"object": copy.deepcopy(paid_invoice)}}
+    tester_sdk.calls.clear()
+    assert (await _post(fresh_client, event)).status_code == 200
+    assert paid_invoice["auto_advance"] is True
+    assert not [c for c in tester_sdk.calls if c[0] == "invoice.modify"]
+
+
+async def test_tester_w4_postgres_overtaken_recheck_keeps_uncertain_write(
+    tester_postgres_db, tester_sdk, sent_otps, monkeypatch,
+):
+    from app.services.billing_service import BillingService
+
+    client, factory, _, _ = tester_postgres_db
+    actor = await _signup(client, sent_otps, "b184-overtaken@example.com")
+    ready, release = asyncio.Event(), asyncio.Event()
+    original_session = None
+    pids = set()
+    lock_calls = 0
+    real_lock = BillingService._tester_lock
+
+    async def pause_original(service, user_id, org_id):
+        nonlocal original_session, lock_calls
+        pids.add(service.session.info["b184_pid"])
+        if original_session is None:
+            original_session = service.session
+        if service.session is original_session:
+            lock_calls += 1
+            if lock_calls == 2:
+                ready.set()
+                await _tester_wait_for(release.wait(), "release overtaken original request")
+        return await real_lock(service, user_id, org_id)
+
+    monkeypatch.setattr(BillingService, "_tester_lock", pause_original)
+    original = asyncio.create_task(_redeem(client, actor))
+    try:
+        await _tester_wait_for(ready.wait(), "original request commits reservation")
+        tester_sdk.fail = "after"
+        _tester_refusal(await _tester_wait_for(_redeem(client, actor), "retry overtakes original"), 502, "stripe_unavailable")
+        assert len(pids) == 2, "the retry must use a separate PostgreSQL backend"
+        assert len(tester_sdk.successes) == 1
+        tester_sdk.promo["active"] = False
+        # An incomplete list response must not justify releasing another request's unknown write.
+        monkeypatch.setattr(_stripe.Subscription, "list", lambda **kw: _TesterPages([[]]))
+        release.set()
+        _tester_refusal(await _tester_wait_for(original, "original rechecks after uncertain retry"), 502, "stripe_unavailable")
+    finally:
+        release.set()
+        await _tester_cancel_tasks(original)
+    [pending] = await _tester_rows(factory)
+    assert pending.state == "pending"
+    paid = await client.post(_checkout_url(actor), headers=actor["headers"], json={"price_id": "price_pro"})
+    _tester_refusal(paid, 409, "subscription_exists")
+    monkeypatch.setattr(_stripe.Subscription, "list", tester_sdk.list_subscriptions)
+    _tester_success(await _redeem(client, actor))
+    assert len(tester_sdk.creates) == 1
+    await _tester_applied(factory, actor, tester_sdk)
+    _tester_invoice_held(tester_sdk)

@@ -9,7 +9,10 @@ from app.db.types import UUID_TYPE, TZ_DATETIME
 
 
 class TesterRedemption(Base):
-    """Durable one-use reservation; pending never grants entitlement.
+    """Durable one-use reservation; reserved/pending never grant entitlement.
+
+    Reserved proves no external write has been attempted. Pending is committed before
+    the write, so even an overtaken request must preserve an uncertain outcome.
 
     The UUID supplies the Stripe idempotency key. Retain applied rows after cancellation.
     Only server-resolved identifiers are stored, never the submitted code or payment data.
