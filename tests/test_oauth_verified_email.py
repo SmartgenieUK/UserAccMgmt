@@ -30,6 +30,36 @@ CALLBACK = "/api/v1/oauth/google/callback"
 VERIFY = "/api/v1/oauth/verify"
 
 
+@pytest.fixture(autouse=True)
+def welcome_offline(monkeypatch):
+    """Stripe is replaced at its gateway seam; any accidental real socket fails closed.
+
+    Shared by the three BRIEF-183 witness modules, not an SDK/network-response mock.
+    """
+    import socket
+    from app.services.stripe_gateway import StripeGateway
+    from tests.test_billing import FakeStripeGateway
+
+    gateway = FakeStripeGateway(get_settings())
+    for name in ("create_customer", "create_checkout_session", "retrieve_subscription", "list_subscriptions", "list_open_checkout_sessions", "create_portal_session", "construct_event"):
+        method = getattr(gateway, name)
+        monkeypatch.setattr(StripeGateway, name, lambda self, *args, _method=method, **kwargs: _method(*args, **kwargs))
+
+    def loopback_only(method):
+        def guarded(sock, address, *args, **kwargs):
+            # Windows socketpair uses loopback TCP for asyncio's self-pipe.
+            # Permit numeric loopback only, without resolving external hostnames.
+            if isinstance(address, tuple) and address and address[0] in ("127.0.0.1", "::1"):
+                return method(sock, address, *args, **kwargs)
+            raise AssertionError("BRIEF-183 witness attempted a real network connection")
+
+        return guarded
+
+    monkeypatch.setattr(socket.socket, "connect", loopback_only(socket.socket.connect))
+    monkeypatch.setattr(socket.socket, "connect_ex", loopback_only(socket.socket.connect_ex))
+    yield gateway
+
+
 class FakeResp:
     def __init__(self, data):
         self._data = data
@@ -54,6 +84,7 @@ def userinfo(monkeypatch):
             return {"access_token": "at"}
 
         async def get(self, url):
+            assert url in ("https://openidconnect.googleapis.com/v1/userinfo", "https://graph.microsoft.com/oidc/userinfo"), "Prefill must not add Graph /me or another lookup"
             return FakeResp(dict(answer))
 
         async def aclose(self):
@@ -348,3 +379,60 @@ async def test_audit_completed_records_joined_or_created(fresh_client, session_f
     assert e.event_metadata["outcome"] == outcome
     assert e.user_id is not None
     await _no_secrets(session_factory, pending_id, otp, r.json()["access_token"], r.json()["refresh_token"])
+
+
+# BRIEF-183 U4: direct/linked and Redis pending flows, durable prefill and completed-choice isolation.
+@pytest.mark.parametrize("verified", [True, False])
+async def test_u4_drop_pending_prefill_hints_survive_fresh_requests(fresh_client, session_factory, fake_redis, userinfo, sent_otps, verified):
+    userinfo.update({"sub": "prefill-sub", "email": "prefill@example.com", "email_verified": verified,
+                     "given_name": "Ada", "family_name": "Lovelace", "job_title": "Mathematician"})
+    r = await _callback(fresh_client, fake_redis)
+    if not verified:
+        assert r.status_code == 202, r.text
+        pid = r.json()["pending_id"]
+        # Poison the provider after callback. Verify must use server-side pending data, not fetch again.
+        userinfo.clear()
+        r = await fresh_client.post(VERIFY, json={"pending_id": pid, "otp": sent_otps[-1], "first_name": "Forged", "profile_completed": True})
+    assert r.status_code == 200, r.text
+    async with session_factory() as fresh:
+        row = (await fresh.execute(select(User).where(User.normalized_email == "prefill@example.com"))).scalar_one()
+        assert (row.first_name, row.last_name, row.role) == ("Ada", "Lovelace", "Mathematician")
+        assert row.profile_completed is False
+        assert row.company_name is None and row.country is None
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("linked", [False, True])
+async def test_u4_overwrite_completed_profile_and_fill_only_unset_fields(client, db_session, fake_redis, userinfo, sent_otps, completed, linked):
+    row = await _victim(db_session)
+    row.first_name, row.last_name, row.role = "Chosen", None, "Chosen role"
+    row.company_name, row.country, row.phone = "Chosen company", "NZ", "+64211234567"
+    row.github_url, row.linkedin_url = "https://github.com/chosen", "https://linkedin.com/in/chosen"
+    row.profile_completed = completed
+    if linked:
+        db_session.add(ExternalIdentity(user_id=row.id, provider=ExternalProvider.GOOGLE, provider_user_id="repeat-sub", email=VICTIM))
+    await db_session.commit()
+    userinfo.update({"sub": "repeat-sub", "email": VICTIM, "email_verified": False,
+                     "given_name": "Overwrite", "family_name": "Hint surname", "job_title": "Overwrite role"})
+    r = await _callback(client, fake_redis)
+    if not linked:
+        assert r.status_code == 202, r.text
+        r = await client.post(VERIFY, json={"pending_id": r.json()["pending_id"], "otp": sent_otps[-1]})
+    assert r.status_code == 200, r.text
+    await db_session.refresh(row)
+    assert (row.first_name, row.role, row.profile_completed) == ("Chosen", "Chosen role", completed)
+    assert row.last_name == (None if completed else "Hint surname")
+    assert (row.company_name, row.country, row.phone, row.github_url, row.linkedin_url) == ("Chosen company", "NZ", "+64211234567", "https://github.com/chosen", "https://linkedin.com/in/chosen")
+
+
+@pytest.mark.parametrize("hints", [
+    {"given_name": 7, "family_name": [], "job_title": {}},
+    {"given_name": "x" * 81, "family_name": "x" * 81, "job_title": "x" * 121},
+    {"given_name": "X\nY", "family_name": "X\x00Y", "job_title": "X\tY"},
+])
+async def test_u4_invalid_prefill_never_blocks_login_or_completes_profile(client, db_session, fake_redis, userinfo, hints):
+    userinfo.update({"sub": "bad-hint-sub", "email": "bad-hint@example.com", "email_verified": True, **hints})
+    r = await _callback(client, fake_redis)
+    assert r.status_code == 200, r.text
+    row = (await db_session.execute(select(User).where(User.normalized_email == "bad-hint@example.com"))).scalar_one()
+    assert (row.first_name, row.last_name, row.role, row.profile_completed) == (None, None, None, False)
