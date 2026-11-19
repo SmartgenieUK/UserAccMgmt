@@ -2057,11 +2057,11 @@ def test_tester_w6_setting_and_migration():
     cfg = Config(str(B184_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(B184_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["20261113_000008"], "omit-redemption-migration"
-    assert script.get_revision("20261113_000008").down_revision == "20261113_000007"
+    assert script.get_heads() == ["20261113_000009"], "omit-redemption-migration"
+    assert script.get_revision("20261113_000009").down_revision == "20261113_000008"
     assert script.get_revision("20261113_000007").down_revision == "20261021_000006"
     model = _tester_model()
-    path = B184_ROOT / "alembic/versions/20261113_000008_tester_redemptions.py"
+    path = B184_ROOT / "alembic/versions/20261113_000009_tester_redemptions.py"
     assert path.is_file(), "omit-redemption-migration"
     spec = importlib.util.spec_from_file_location("b184_migration", path)
     mig = importlib.util.module_from_spec(spec)
@@ -2182,7 +2182,7 @@ async def tester_postgres_db(fake_redis):
         Base.metadata.create_all(conn, tables=[t for t in Base.metadata.sorted_tables if t is not model.__table__])
         cfg = Config(str(B184_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(B184_ROOT / "alembic"))
-        migration = ScriptDirectory.from_config(cfg).get_revision("20261113_000008").module
+        migration = ScriptDirectory.from_config(cfg).get_revision("20261113_000009").module
         with Operations.context(MigrationContext.configure(conn)):
             migration.upgrade()
 

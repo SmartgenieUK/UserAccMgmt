@@ -371,7 +371,8 @@ def test_u3_wrong_down_revision_single_head():
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["20261113_000009"]  # BRIEF-184: the sole successor head
+    assert script.get_revision("20261113_000009").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
@@ -486,54 +487,6 @@ async def test_s10_the_entra_claims_answer_is_byte_identical(entra_client, db_se
     assert after.content == before.content
 
 
-<<<<<<< HEAD
-=======
-# --- S11 the migration matches the model ---------------------------------------------------------------------
-
-REVISION = "20261113_000007"
-PREVIOUS = "20261021_000006"
-
-
-def _migration():
-    path = ROOT / "alembic" / "versions" / "20261113_000007_user_company_linkedin.py"
-    spec = importlib.util.spec_from_file_location("mig_user_company_linkedin", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_s11_one_head_and_it_follows_the_live_cancel_revision():
-    cfg = Config(str(ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(ROOT / "alembic"))
-    script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["20261113_000008"]  # BRIEF-184: the sole successor head
-    assert script.get_revision("20261113_000008").down_revision == REVISION
-    assert script.get_revision(REVISION).down_revision == PREVIOUS
-
-
-def test_s11_upgrade_adds_exactly_the_two_columns_and_downgrade_removes_them():
-    mig = _migration()
-    engine = sa.create_engine("sqlite://")
-    with engine.begin() as conn:
-        conn.execute(sa.text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
-        with Operations.context(MigrationContext.configure(conn)):
-            mig.upgrade()
-        cols = {c["name"]: c for c in sa.inspect(conn).get_columns("users")}
-        assert set(cols) == {"id", "company_name", "linkedin_url"}
-        for name in ("company_name", "linkedin_url"):
-            assert cols[name]["nullable"] is True
-            assert cols[name]["type"].length == User.__table__.c[name].type.length
-        assert (cols["company_name"]["type"].length, cols["linkedin_url"]["type"].length) == (120, 255)
-    with engine.begin() as conn:
-        with Operations.context(MigrationContext.configure(conn)):
-            mig.downgrade()
-        assert {c["name"] for c in sa.inspect(conn).get_columns("users")} == {"id"}
-
-
-# --- S12 /help lists the route -------------------------------------------------------------------------------
-
-
->>>>>>> b89b14a (test(cr-020): BRIEF-184 witness - tester codes W1-W6, Stripe mocked at the gateway seam (RED: feature absent))
 async def test_s12_help_lists_the_route(client):
     res = await client.get("/api/v1/help")
     assert res.status_code == 200

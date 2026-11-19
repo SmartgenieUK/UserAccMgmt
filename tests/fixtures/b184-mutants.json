@@ -285,14 +285,14 @@
     {
       "name": "omit-redemption-migration",
       "witness": "W6",
-      "target": "alembic/versions/20261113_000008_tester_redemptions.py",
+      "target": "alembic/versions/20261113_000009_tester_redemptions.py",
       "mutation": "Make upgrade a no-op while keeping valid migration metadata and imports.",
       "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w6_setting_and_migration\""
     },
     {
       "name": "drop-user-unique",
       "witness": "W6",
-      "target": "alembic/versions/20261113_000008_tester_redemptions.py",
+      "target": "alembic/versions/20261113_000009_tester_redemptions.py",
       "mutation": "Omit user_id uniqueness from the migration but retain it in model metadata.",
       "command": "C:/localcode/UserAccMgmt/.venv/Scripts/python.exe -m pytest -q tests/test_billing.py -k \"tester_w6_setting_and_migration\""
     },

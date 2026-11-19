@@ -5,8 +5,8 @@ from alembic import op
 
 from app.db.types import UUID_TYPE, TZ_DATETIME
 
-revision = "20261113_000008"
-down_revision = "20261113_000007"
+revision = "20261113_000009"
+down_revision = "20261113_000008"
 branch_labels = None
 depends_on = None
 
