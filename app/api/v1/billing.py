@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+import json
 import uuid
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
 from app.core.config import get_settings, Settings
-from app.core.exceptions import ForbiddenError
+from app.core.exceptions import ForbiddenError, ValidationError
 from app.db.session import get_session
 from app.models.enums import Role
 from app.models.organization import Organization
-from app.security.dependencies import get_current_user, get_current_membership, require_scopes
+from app.security.dependencies import get_current_user, get_current_membership, get_token_payload, require_scopes
 from app.services.audit_service import AuditService
 from app.services.stripe_gateway import StripeGateway, get_stripe_gateway
 from app.services.billing_service import BillingService
@@ -69,6 +70,39 @@ async def create_checkout_session(
     url = await service.create_checkout_session(org, data.price_id, str(current_user.id), current_user.email)
     await session.commit()
     return UrlResponse(url=url)
+
+
+@router.post("/orgs/{org_id}/billing/tester-code")
+async def redeem_tester_code(
+    org_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+    membership=Depends(get_current_membership),
+    payload=Depends(get_token_payload),
+    session: AsyncSession = Depends(get_session),
+    service: BillingService = Depends(get_billing_service),
+):
+    # A real member must receive admin_required before the billing scope refusal.
+    _require_org(membership, org_id, admin=True)
+    await require_scopes(["billing:write"])(payload)
+
+    def closed_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate field")
+            result[key] = value
+        return result
+
+    try:
+        data = json.loads(await request.body(), object_pairs_hook=closed_object)
+    except (ValueError, UnicodeDecodeError):
+        raise ValidationError("Invalid tester code", code="invalid_tester_code") from None
+    if (not isinstance(data, dict) or set(data) != {"code"}
+            or not isinstance(data["code"], str) or not 1 <= len(data["code"].strip()) <= 64):
+        raise ValidationError("Invalid tester code", code="invalid_tester_code")
+    org = await session.get(Organization, uuid.UUID(org_id))
+    return await service.redeem_tester_code(org, data["code"].strip(), str(current_user.id), current_user.email)
 
 
 @router.post("/orgs/{org_id}/billing/portal-session", response_model=UrlResponse)

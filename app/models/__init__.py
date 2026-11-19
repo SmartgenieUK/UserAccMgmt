@@ -12,6 +12,7 @@ from .audit_event import AuditEvent
 from .plan import Plan
 from .subscription import Subscription
 from .stripe_event import StripeEvent
+from .tester_redemption import TesterRedemption
 
 __all__ = [
     "Role",
@@ -30,4 +31,5 @@ __all__ = [
     "Plan",
     "Subscription",
     "StripeEvent",
+    "TesterRedemption",
 ]

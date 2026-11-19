@@ -371,7 +371,8 @@ def test_u3_wrong_down_revision_single_head():
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["20261113_000009"]  # BRIEF-184: the sole successor head
+    assert script.get_revision("20261113_000009").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
